@@ -362,9 +362,9 @@ class SerDeser:
         return el
 
     def read(self, n):
-        assert n >= 1
-        if self.i + n - 1 >= len(self.b):
-            None
+        assert n >= 0
+        if self.i + n > len(self.b):
+            raise EOFError
         i = self.i
         self.i += n
         return self.b[i:self.i]
@@ -378,18 +378,22 @@ class SerDeser:
         elif b[0] < 0xc0:
             return Atom(self.read(b[0] & 0x3F))
         elif b[0] < 0xe0:
-            n = ((b[0] & 0x1F) << 8) | self.read(1)
+            n = ((b[0] & 0x1F) << 8) | self.read(1)[0]
             return Atom(self.read(n))
         elif b[0] < 0xf0:
             n = ((b[0] & 0x1F) << 16)
-            n |= (self.read(1) << 8)
-            n |= self.read(1)
+            n |= (self.read(1)[0] << 8)
+            n |= self.read(1)[0]
             return Atom(self.read(n))
         elif b[0] == 0xff:
             l = self._Deserialize()
             if isinstance(l, Error):
                 return l
-            r = self._Deserialize()
+            try:
+                r = self._Deserialize()
+            except EOFError:
+                l.deref()
+                raise
             if isinstance(r, Error):
                 l.deref()
                 return r
