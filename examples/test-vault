@@ -1,0 +1,103 @@
+
+; test-vault - a vault with an immediate clawback path and a delayed hot path
+;
+; The vault coin is spendable two ways:
+;   clawback: the cold key signs, valid immediately, MODE = 1
+;   hot spend: the hot key signs and the spending input must assert a
+;     relative delay of at least DELAY blocks via its nSequence, MODE = 0
+;
+; The nSequence checks require the value to be below 2^16. BIP68 only
+; reads the low 16 bits for the effective height delay, so any check
+; that lets bits 16 to 31 float (disable bit 31, type bit 22, reserved
+; bits) would let a value like 0x01000A pass a raw comparison against
+; DELAY while carrying an effective delay of 10 blocks. Keeping the
+; whole value under 2^16 makes the raw comparison equal the BIP68
+; comparison. The transaction version must be at least 2 for BIP68 to
+; apply. Note that the repl only evaluates the program against the
+; provided transaction, it does not model BIP68 consensus enforcement,
+; so the delay is only as real as the consensus rules that would
+; surround a deployment.
+;
+; All hex constants below were produced by
+;   python3 examples/gen-test-context.py vault
+; The signatures commit to the transaction with SIGHASH_DEFAULT.
+;
+; Run with
+;   echo "import examples/test-vault" | ./bllsh
+; Piping the file itself into the repl re-runs each command at every
+; blank line (cmd.Cmd repeats the last command on an empty input line),
+; the import command skips blank lines.
+;
+; Expected results, in order: 1 (delay check alone), 1, 1, 1 and 1
+; (the same spends through the compiled program), error (wrong key for
+; the hot path), error (wrong key for the clawback), nil (delay check
+; alone on the immature input), error (immature delay), 1, then the
+; compiled program.
+
+def COLDPK 0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+def HOTPK 0xc6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5
+def DELAY 144
+
+def (CHECKDELAY) (all (notall (< (tx 10) (DELAY))) (< (tx 10) 65536) (notall (< (tx 0) 2)))
+
+def (CLAWBACK SIG) (bip340_verify (COLDPK) (bip342_txmsg) SIG)
+def (HOTSPEND SIG) (all (CHECKDELAY) (bip340_verify (HOTPK) (bip342_txmsg) SIG))
+
+def (VAULT MODE SIG) (if (if MODE (CLAWBACK SIG) (HOTSPEND SIG)) 1 (x "vault: spend not authorized"))
+
+; -------------------------------------------------------------------
+; context A: hot spend after the 144 block delay
+
+tx 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00000000009000000001b882010000000000225120c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5020f626c6c3a207661756c742064656d6f21c1f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f900000000
+tx_in_idx 0
+tx_script 626c6c3a207661756c742064656d6f
+utxos a086010000000000225120602c586c4a138b58be8f825a54815106f8020a928d2755f69d694ace06d7635d
+
+def SIGHOTA 0x47000aeb0132b9ae594ae887caea8f511ec6c40fe1ec6277f14793441fb94fa11349674decfc99c68b40d896b220282c4e8ebb7a1a12e74af1166369649c11b9
+def SIGCOLDA 0xbe373f57a2a8839ffca71bc8d5d0418a2c0bc243c976f36bd29b3bf976a81d0773ccaa2e7a26ae6de74401a8e0519257b41b59ab0880f16adff58c262cb8524a
+
+; the delay check alone accepts this input's nSequence of 144, expect 1
+eval (CHECKDELAY)
+
+; hot spend with a mature delay, expect 1
+eval (VAULT 0 (SIGHOTA))
+
+; clawback works on the same transaction, expect 1
+eval (VAULT 1 (SIGCOLDA))
+
+; the same two spends through the compiled program instead of the
+; symbll interpreter, the environment is the compiler's argument tree
+; (MODE . SIG), expect 1 and 1
+blleval @VAULT (0 . 0x47000aeb0132b9ae594ae887caea8f511ec6c40fe1ec6277f14793441fb94fa11349674decfc99c68b40d896b220282c4e8ebb7a1a12e74af1166369649c11b9)
+blleval @VAULT (1 . 0xbe373f57a2a8839ffca71bc8d5d0418a2c0bc243c976f36bd29b3bf976a81d0773ccaa2e7a26ae6de74401a8e0519257b41b59ab0880f16adff58c262cb8524a)
+
+; the cold signature does not authorize the hot path, expect an error
+eval (VAULT 0 (SIGCOLDA))
+
+; the hot signature does not authorize the clawback, expect an error
+eval (VAULT 1 (SIGHOTA))
+
+; -------------------------------------------------------------------
+; context B: premature hot spend, only 10 blocks of delay
+
+tx 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00000000000a00000001b882010000000000225120c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5020f626c6c3a207661756c742064656d6f21c1f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f900000000
+tx_in_idx 0
+tx_script 626c6c3a207661756c742064656d6f
+utxos a086010000000000225120602c586c4a138b58be8f825a54815106f8020a928d2755f69d694ace06d7635d
+
+def SIGHOTB 0xf50e475b1ca5579f1120c363947ea38a2abc8a252db06bf35920c975ba28452b6d564b71cb4707889208266dceef03cd3ec1dc87b4ded9ae57e4aac1eb718e9e
+def SIGCOLDB 0xd37da6d5cf4af92a394c081d221c20e3b40ecd2e58649b7c266985093fcc6d333d2cb73bd5a238f7ef6536b3d87bffd424fcb462eab7c401041467b9a6ff50ec
+
+; the delay check alone refuses this input's nSequence of 10, expect nil
+eval (CHECKDELAY)
+
+; the hot path refuses the immature delay, expect an error
+eval (VAULT 0 (SIGHOTB))
+
+; the clawback does not wait, expect 1
+eval (VAULT 1 (SIGCOLDB))
+
+; -------------------------------------------------------------------
+; compilation check
+
+program VAULT
