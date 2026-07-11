@@ -208,6 +208,8 @@ class op_mod(FixOpcode):
     def operation(cls, num, den):
         if not num.is_atom() or not den.is_atom():
             return Error("mod requires atoms")
+        if den.as_int() == 0:
+            return Error("mod: attempted div by 0")
         return Atom(num.as_int() % den.as_int())
 
 class op_lt_num(BinOpcode):
@@ -650,7 +652,7 @@ class op_list_read(FixOpcode):
     @classmethod
     def operation(cls, el):
         if not el.is_atom():
-            raise Exception("rd: argument must be atom")
+            return Error("rd: argument must be atom")
         edeser = SerDeser.Deserialize(el.val2)
         return edeser
 
@@ -660,6 +662,8 @@ class op_list_write(FixOpcode):
     @classmethod
     def operation(cls, el):
         eser = SerDeser.Serialize(el)
+        if isinstance(eser, Error):
+            return eser
         return Atom(eser)
 
 class op_secp256k1_muladd(BinOpcode):
