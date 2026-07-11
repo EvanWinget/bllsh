@@ -66,7 +66,7 @@ def (CHECKNEWSPK OUTIDX SPKODD OV EM EMPATH PARAMS) (MATCHNEWSPK (CHECKTAPSPK (t
 ; -------------------------------------------------------------------
 ; check value of output
 
-def (CHECKVALUE OV EM PARAMS OUTIDX) (not (< (+ (tx 21) (EXTRACT OV EM PARAMS)) (tx 15)))
+def (CHECKVALUE OV EM PARAMS OUTIDX) (notall (< (+ (tx 21) (EXTRACT OV EM PARAMS)) (tx 15)))
 
 ; -------------------------------------------------------------------
 ; check overview/earmark were correct
@@ -76,5 +76,5 @@ def (CHECKOVEM OV EM EMPATH) (= (substr (tx 8) 0 32) (EMROOT OV EM EMPATH))
 ; -------------------------------------------------------------------
 ; combine it all together
 
-def (FLEXMARK OV EM EMPATH PARAMS OUTIDX SPKODD) (if (and (CHECKEM OV EM PARAMS) (CHECKOVEM OV EM EMPATH) (CHECKVALUE OV EM PARAMS OUTIDX) (CHECKNEWSPK OUTIDX SPKODD OV EM EMPATH PARAMS)) 1 (x))
+def (FLEXMARK OV EM EMPATH PARAMS OUTIDX SPKODD) (if (all (CHECKEM OV EM PARAMS) (CHECKOVEM OV EM EMPATH) (CHECKVALUE OV EM PARAMS OUTIDX) (CHECKNEWSPK OUTIDX SPKODD OV EM EMPATH PARAMS)) 1 (x))
 
