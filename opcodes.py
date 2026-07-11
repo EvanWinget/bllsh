@@ -219,6 +219,9 @@ class op_lt_num(BinOpcode):
 
     @classmethod
     def binop(cls, left, right):
+        if left.is_nil():
+            # failed already
+            return left.bumpref()
         if not right.is_atom():
             return Atom(0)
         if left.is_cons():
@@ -608,6 +611,9 @@ class op_lt_str(BinOpcode):
 
     @classmethod
     def binop(cls, left, right):
+        if left.is_nil():
+            # failed already
+            return left.bumpref()
         if not right.is_atom():
             return Atom(0)
         if left.is_cons():
