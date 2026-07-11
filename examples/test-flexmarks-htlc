@@ -1,0 +1,198 @@
+
+; flexmarks with an HTLC earmark
+; https://delvingbitcoin.org/t/flexible-coin-earmarks/1275
+;
+; The fixed framework (everything below the policy section) is the one
+; from examples/test-flexmarks. The policy hooks instantiate a lightning
+; style HTLC earmark:
+;   (payment-hash amount recipient-pubkey sender-pubkey timeout)
+; The recipient can exercise the earmark by revealing the preimage and
+; signing, the sender can reclaim it by signing once the transaction's
+; nLockTime has reached the timeout. The timeout is a block height, and
+; the refund branch checks that nLockTime is height typed (below
+; 500000000) as well as past the timeout, the way OP_CLTV requires
+; matching types, since a time typed nLockTime in the past would
+; satisfy a bare numeric comparison immediately. Either way the
+; earmark's amount leaves the coin and the earmark is replaced by nil
+; in the recreated output.
+;
+; PARAMS is (branch preimage . signature), branch 1 claims with the
+; preimage, branch 0 refunds after the timeout.
+;
+; Note that the repl only evaluates the program against the provided
+; transaction. It does not enforce that nLockTime is consensus
+; meaningful (the input's nSequence is set below 0xffffffff so it would
+; be), so the timeout is only as real as the surrounding consensus.
+;
+; The test transactions at the bottom were produced by
+;   python3 examples/gen-test-context.py htlc
+;
+; Run with
+;   echo "import examples/test-flexmarks-htlc" | ./bllsh
+; (piping the file itself into the repl re-runs commands on blank lines)
+
+; -------------------------------------------------------------------
+; the earmark policy
+
+def (EXTRACT OV EM PARAMS) (h (t EM))
+def (NEWIPK OV EM PARAMS) (tx 7)
+def (NEWEM OV EM PARAMS) 0
+def (NEWOV OV EM PARAMS) OV
+
+; nLockTime satisfies a height timeout only if it is itself a height.
+; Values of 500000000 and above are unix times under the locktime
+; rules, and any past time would satisfy a bare numeric comparison
+; immediately, so the type check is what makes the timeout real.
+def (CLTVOK T) (all (< (tx 1) 500000000) (notall (< (tx 1) T)))
+
+def (CLAIM EM PRE SIG) (all (= (sha256 PRE) (h EM)) (bip340_verify (h (t (t EM))) (bip342_txmsg) SIG))
+def (REFUND EM SIG) (all (CLTVOK (h (t (t (t (t EM)))))) (bip340_verify (h (t (t (t EM)))) (bip342_txmsg) SIG))
+
+def (CHECKEM OV EM PARAMS) (if (h PARAMS) (CLAIM EM (h (t PARAMS)) (t (t PARAMS))) (REFUND EM (t (t PARAMS))))
+
+def (HTLCPARAMS BRANCH PRE SIG) (rc (rc SIG PRE) BRANCH)
+
+; -------------------------------------------------------------------
+; generic helpers
+
+def (VARINT2 N) (if (< N 253) (substr N 0 1) (cat 0xFD (substr (cat N 0x000000) 0 2)))
+def (VARSTR S) (cat (VARINT2 (strlen S)) S)
+
+def (TAGHASH2 SHATAG DATA) (sha256 SHATAG SHATAG DATA)
+def (TAGHASH TAG DATA) (TAGHASH2 (sha256 TAG) DATA)
+
+; -------------------------------------------------------------------
+; taproot calculations
+
+def (TAPBRANCH A B) (TAGHASH "TapBranch" (if (<s A B) (cat A B) (cat B A)))
+def (TAPPATH IPK PATH LEAF) (if PATH (TAPPATH IPK (substr PATH 32) (TAPBRANCH LEAF (substr PATH 0 32))) (TAGHASH "TapTweak" (cat IPK LEAF)))
+
+def (TAPROOT SPKODD LEAFHASH PATH IPK SPK) (secp256k1_muladd (TAPPATH IPK PATH LEAFHASH) (rc IPK 1) (rc SPK SPKODD))
+
+; -------------------------------------------------------------------
+; earmark root calculation
+
+def (EMBRANCH A B) (TAGHASH "EMBranch" (if (<s A B) (cat A B) (cat B A)))
+def (EMLEAF EM) (TAGHASH "EMLeaf" (wr EM))
+def (EMPATH LEAF PATH) (if PATH (EMPATH (EMBRANCH LEAF (substr PATH 0 32)) (substr PATH 32)) LEAF)
+def (EMROOT OV EM PATH) (TAGHASH "EM" (wr (rc (EMPATH (EMLEAF EM) PATH) OV)))
+
+; -------------------------------------------------------------------
+; check spk of output
+
+; take the current path, replace the first component with the new EMROOT
+def (NEWTLPATH OV EM EMPATH) (cat (EMROOT OV EM EMPATH) (substr (tx 8) 32))
+
+def (MATCHNEWSPK SPK SPKODD OV EM EMPATH PARAMS) (TAPROOT SPKODD (tx 6) (NEWTLPATH (NEWOV OV EM PARAMS) (NEWEM OV EM PARAMS) EMPATH) (NEWIPK OV EM PARAMS) SPK)
+
+def (CHECKTAPSPK SPK) (if (= (substr SPK 0 2) 0x5120) (substr SPK 2) (x))
+
+def (CHECKNEWSPK OUTIDX SPKODD OV EM EMPATH PARAMS) (MATCHNEWSPK (CHECKTAPSPK (tx (rc OUTIDX 21))) SPKODD OV EM EMPATH PARAMS)
+
+; -------------------------------------------------------------------
+; check value of output
+
+def (CHECKVALUE OV EM PARAMS OUTIDX) (notall (< (+ (tx (rc OUTIDX 20)) (EXTRACT OV EM PARAMS)) (tx 15)))
+
+; -------------------------------------------------------------------
+; check overview/earmark were correct
+
+def (CHECKOVEM OV EM EMPATH) (= (substr (tx 8) 0 32) (EMROOT OV EM EMPATH))
+
+; -------------------------------------------------------------------
+; combine it all together
+
+def (FLEXMARK OV EM EMPATH PARAMS OUTIDX SPKODD) (if (all (CHECKEM OV EM PARAMS) (CHECKOVEM OV EM EMPATH) (CHECKVALUE OV EM PARAMS OUTIDX) (CHECKNEWSPK OUTIDX SPKODD OV EM EMPATH PARAMS)) 1 (x))
+
+; -------------------------------------------------------------------
+; test context
+;
+; A coin of 100000 sats carrying a single 5000 sat HTLC earmark with a
+; timeout at height 500, overview nil, empty earmark path. Output 0
+; recreates the coin with 95000 sats and the earmark replaced by nil,
+; output 1 pays whoever exercised the earmark (4000 sats, 1000 is fee).
+
+def EM (q 0x479879c766ce108943ecf6bbba394ffd103cbed814074c9771e65645520fb46a 5000 0xd30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65 0x1697ffa6fd9de627c077e3d2fe541084ce13300b0bec1146f95ae57f0d0bd6a5 500)
+def PREIMAGE 0x68746c632064656d6f20707265696d6167652c203332206279746573206f6b21
+
+; recipient claims with the preimage, nLockTime 0
+tx 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000feffffff02187301000000000022512076dc7c28c70df1bf001f55d420c077b427c90d79089cb49e610c6eb014edd786a00f000000000000225120d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e650217626c6c3a20666c65786d61726b2068746c632064656d6f41c06a245bf6dc698504c89a20cfded60853152b695336c28063b61c65cbd269e6b45da91da879ec10a96365e795b1bf1202bc17a09fab848c0b032bec022604746700000000
+tx_in_idx 0
+tx_script 626c6c3a20666c65786d61726b2068746c632064656d6f
+utxos a086010000000000225120bcdfea0d67a01eab449319533b2b8159f5afd6c759548bb399b85621d81bb1a0
+
+def SIGCLAIM 0x956ea0e69edd04bf01be163a50292baf6ba26c582fe35a6b336d24bd0cb9b9a9299a5770f3ddb1080192a1962feb4df0ba6f74e7c0df0412f89a21081c5f9252
+
+; the claim passes all checks, expect 1
+eval (FLEXMARK 0 (EM) 0 (HTLCPARAMS 1 (PREIMAGE) (SIGCLAIM)) 0 1)
+
+; a wrong preimage does not satisfy the earmark, expect an error
+eval (FLEXMARK 0 (EM) 0 (HTLCPARAMS 1 (h (EM)) (SIGCLAIM)) 0 1)
+
+; the refund branch refuses before the timeout, and the recipient's
+; signature is not the sender's anyway, expect an error
+eval (FLEXMARK 0 (EM) 0 (HTLCPARAMS 0 0 (SIGCLAIM)) 0 1)
+
+; sender refunds after the timeout, nLockTime 505
+tx 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000feffffff02187301000000000022512076dc7c28c70df1bf001f55d420c077b427c90d79089cb49e610c6eb014edd786a00f0000000000002251201697ffa6fd9de627c077e3d2fe541084ce13300b0bec1146f95ae57f0d0bd6a50217626c6c3a20666c65786d61726b2068746c632064656d6f41c06a245bf6dc698504c89a20cfded60853152b695336c28063b61c65cbd269e6b45da91da879ec10a96365e795b1bf1202bc17a09fab848c0b032bec0226047467f9010000
+tx_in_idx 0
+tx_script 626c6c3a20666c65786d61726b2068746c632064656d6f
+utxos a086010000000000225120bcdfea0d67a01eab449319533b2b8159f5afd6c759548bb399b85621d81bb1a0
+
+def SIGREFUND 0x0140af78929747343d8e64a0d266d7cd3a099fa76791a233c884a7b73a0188bad12829899f24d2e64a4276a48ed46d492177f4441b438cb9722f095dbc111618
+
+; the refund passes once nLockTime reaches the timeout, expect 1
+eval (FLEXMARK 0 (EM) 0 (HTLCPARAMS 0 0 (SIGREFUND)) 0 1)
+
+; sender tries to refund before the timeout, nLockTime 490
+tx 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000feffffff02187301000000000022512076dc7c28c70df1bf001f55d420c077b427c90d79089cb49e610c6eb014edd786a00f0000000000002251201697ffa6fd9de627c077e3d2fe541084ce13300b0bec1146f95ae57f0d0bd6a50217626c6c3a20666c65786d61726b2068746c632064656d6f41c06a245bf6dc698504c89a20cfded60853152b695336c28063b61c65cbd269e6b45da91da879ec10a96365e795b1bf1202bc17a09fab848c0b032bec0226047467ea010000
+tx_in_idx 0
+tx_script 626c6c3a20666c65786d61726b2068746c632064656d6f
+utxos a086010000000000225120bcdfea0d67a01eab449319533b2b8159f5afd6c759548bb399b85621d81bb1a0
+
+def SIGEARLY 0xba1b67dd7e8d192791d05d10772240a200d54d57f09cee88ae463af79a1ca99e80f433620e0564a1b0e0e5eab3027124319b259de7348460ceaa77576ab30942
+
+; the timeout has not been reached, expect an error
+eval (FLEXMARK 0 (EM) 0 (HTLCPARAMS 0 0 (SIGEARLY)) 0 1)
+
+; the timelock check alone refuses nLockTime 490, expect nil
+eval (CLTVOK 500)
+
+; recipient claims after the timeout has passed, nLockTime 505
+tx 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000feffffff02187301000000000022512076dc7c28c70df1bf001f55d420c077b427c90d79089cb49e610c6eb014edd786a00f000000000000225120d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e650217626c6c3a20666c65786d61726b2068746c632064656d6f41c06a245bf6dc698504c89a20cfded60853152b695336c28063b61c65cbd269e6b45da91da879ec10a96365e795b1bf1202bc17a09fab848c0b032bec0226047467f9010000
+tx_in_idx 0
+tx_script 626c6c3a20666c65786d61726b2068746c632064656d6f
+utxos a086010000000000225120bcdfea0d67a01eab449319533b2b8159f5afd6c759548bb399b85621d81bb1a0
+
+def SIGCLAIMLATE 0x473e3fd8eb4ddda9228e15801c2f330cd05f4edd81774942f947b7d977b5748fb2703f74138df7f30ce39377d72b98bbf52b3a82ee1d1850edd9ba54c98447b1
+
+; the claim branch does not expire, the preimage still wins after the
+; timeout, expect 1
+eval (FLEXMARK 0 (EM) 0 (HTLCPARAMS 1 (PREIMAGE) (SIGCLAIMLATE)) 0 1)
+
+; the same spend through the compiled program instead of the symbll
+; interpreter, the environment is the compiler's balanced argument
+; tree (((OV . EM) . (EMPATH . PARAMS)) . (OUTIDX . SPKODD)), expect 1
+blleval @FLEXMARK (((0 . (0x479879c766ce108943ecf6bbba394ffd103cbed814074c9771e65645520fb46a 5000 0xd30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65 0x1697ffa6fd9de627c077e3d2fe541084ce13300b0bec1146f95ae57f0d0bd6a5 500)) . (0 . (1 0x68746c632064656d6f20707265696d6167652c203332206279746573206f6b21 . 0x473e3fd8eb4ddda9228e15801c2f330cd05f4edd81774942f947b7d977b5748fb2703f74138df7f30ce39377d72b98bbf52b3a82ee1d1850edd9ba54c98447b1))) . (0 . 1))
+
+; sender tries a time typed nLockTime against the height timeout
+tx 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000feffffff02187301000000000022512076dc7c28c70df1bf001f55d420c077b427c90d79089cb49e610c6eb014edd786a00f0000000000002251201697ffa6fd9de627c077e3d2fe541084ce13300b0bec1146f95ae57f0d0bd6a50217626c6c3a20666c65786d61726b2068746c632064656d6f41c06a245bf6dc698504c89a20cfded60853152b695336c28063b61c65cbd269e6b45da91da879ec10a96365e795b1bf1202bc17a09fab848c0b032bec022604746700f15365
+tx_in_idx 0
+tx_script 626c6c3a20666c65786d61726b2068746c632064656d6f
+utxos a086010000000000225120bcdfea0d67a01eab449319533b2b8159f5afd6c759548bb399b85621d81bb1a0
+
+def SIGTIMETYPED 0xd12e3988345e99e7430f9bc769e5295065d74de9e0ffd7d6c70220940beaee618ee7c0606d46a744a8b48f14be751c4c6ce6660d3e55966b876d4d18a28cf0cb
+
+; nLockTime 1700000000 is a unix time, it satisfies a bare numeric
+; comparison against the height timeout but not the type check, and
+; the sender's signature is valid, so the type check is the only thing
+; refusing this spend, expect an error
+eval (FLEXMARK 0 (EM) 0 (HTLCPARAMS 0 0 (SIGTIMETYPED)) 0 1)
+
+; the timelock check alone refuses the time typed nLockTime, expect nil
+eval (CLTVOK 500)
+
+; -------------------------------------------------------------------
+; compilation check
+
+program FLEXMARK
