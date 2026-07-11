@@ -74,7 +74,13 @@ class fn_op():
 
     def feedback(self, state : Element, value : Element, args : Element, env : Any, workitem : Any) -> None:
         assert not isinstance(value, Error)
-        workitem.new_continuation(self.feed(state, value), args, env)
+        fed = self.feed(state, value)
+        if isinstance(fed, Error):
+            env.deref()
+            args.deref()
+            workitem.fin_value(fed)
+        else:
+            workitem.new_continuation(fed, args, env)
 
 @FuncClass.implements_API
 class fn_partial(FuncClass):
@@ -130,7 +136,10 @@ class fn_partial(FuncClass):
             assert isinstance(state, Func) and issubclass(state.val1[0], fn_op)
             opobj, opstate = state.steal_func()
             nextfunc = opobj.feed(opstate, value)
-            if not nextfunc.is_error():
-                nextfunc = Func(cls, None, nextfunc)
-            workitem.new_continuation(nextfunc, args, env)
+            if nextfunc.is_error():
+                env.deref()
+                args.deref()
+                workitem.fin_value(nextfunc)
+            else:
+                workitem.new_continuation(Func(cls, None, nextfunc), args, env)
 

@@ -135,7 +135,7 @@ class FixOpcode(Opcode):
         assert int_state is None
         n, rest = cls.state_info(state)
         if n >= cls.max_args:
-            return Error("too many arguments")
+            return (Error("too many arguments"), None)
         return (Cons(Cons(arg.bumpref(), rest.bumpref()), Atom(n+1)), None)
 
     @final
