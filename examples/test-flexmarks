@@ -1,27 +1,40 @@
 
 ; flexmarks - flexible coin earmarks
 ; https://delvingbitcoin.org/t/flexible-coin-earmarks/1275
+;
+; The policy hooks below instantiate the simplest useful earmark, a
+; payment pool style withdrawal. Each earmark is a pair of a pubkey and
+; an amount. The member exercises their earmark by signing the spending
+; transaction, which extracts their amount from the coin and replaces
+; their earmark with nil in the recreated output. The overview and the
+; internal public key are left unchanged. A real payment pool would
+; also remove the member's key from the musig internal key, which needs
+; the negation tracking discussed in the delving post.
+;
+; The test transaction at the bottom was produced by
+;   python3 examples/gen-test-context.py flexmarks
+;
+; Run with
+;   echo "import examples/test-flexmarks" | ./bllsh
+; (piping the file itself into the repl re-runs commands on blank lines)
 
 ; -------------------------------------------------------------------
-; *** implement these functions ***
-; these functions define the meaning of the flexible earmark policy
+; the earmark policy
 
-; amount of funds that can be extracted via a given earmark
-; (default: 0)
-def (EXTRACT OV EM PARAMS) 0
+; the earmark is (pubkey . amount), the amount is what leaves the coin
+def (EXTRACT OV EM PARAMS) (t EM)
 
-; how to update the ipk
-; (default: keep it the same)
+; keep the internal public key the same
 def (NEWIPK OV EM PARAMS) (tx 7)
 
-; what to update/replace the earmark with
-def (NEWEM OV EM PARAMS) (x "implement something")
+; an exercised earmark is replaced by nil
+def (NEWEM OV EM PARAMS) 0
 
-; how to update the overview
-def (NEWOV OV EM PARAMS) (x "implement something")
+; the overview is unchanged by a withdrawal
+def (NEWOV OV EM PARAMS) OV
 
-; check if the earmark is valid
-def (CHECKEM OV EM PARAMS) (x "implement something")
+; the earmark's pubkey must sign the spend, PARAMS is the signature
+def (CHECKEM OV EM PARAMS) (bip340_verify (h EM) (bip342_txmsg) PARAMS)
 
 ; -------------------------------------------------------------------
 ; generic helpers
@@ -77,4 +90,101 @@ def (CHECKOVEM OV EM EMPATH) (= (substr (tx 8) 0 32) (EMROOT OV EM EMPATH))
 ; combine it all together
 
 def (FLEXMARK OV EM EMPATH PARAMS OUTIDX SPKODD) (if (all (CHECKEM OV EM PARAMS) (CHECKOVEM OV EM EMPATH) (CHECKVALUE OV EM PARAMS OUTIDX) (CHECKNEWSPK OUTIDX SPKODD OV EM EMPATH PARAMS)) 1 (x))
+
+; -------------------------------------------------------------------
+; test context
+;
+; A pool coin of 100000 sats with two earmarks, 30000 for member 1 and
+; 20000 for member 2, overview nil. Member 1 withdraws. Output 0
+; recreates the pool coin with 70000 sats and member 1's earmark
+; replaced by nil, output 1 pays member 1 (29000 sats, the missing
+; 1000 is the fee, which comes out of the withdrawn amount because
+; CHECKVALUE only protects the pool's remainder).
+
+; member 1 withdraws their 30000 sat earmark
+tx 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000ffffffff0270110100000000002251204587257b2ced9abd802a8a8f303f7a710deefbfdb53acb58170066ec28ce12694871000000000000225120352bbf4a4cdd12564f93fa332ce333301d9ad40271f8107181340aef25be59d5021b626c6c3a20666c65786d61726b2077697468647261772064656d6f41c0774ae7f858a9411e5ef4246b70c65aac5649980be5c17891bbec17895da008cb1684b99f744b7250451f04848ef0ae811ecbdb735e2e023d11f781fb22252ac900000000
+tx_in_idx 0
+tx_script 626c6c3a20666c65786d61726b2077697468647261772064656d6f
+utxos a0860100000000002251202e7339c5980a71ca8bcb4d796196c4fe7a60a161413f2d8ed15f89775a82f6e3
+
+def EM1 (q 0x352bbf4a4cdd12564f93fa332ce333301d9ad40271f8107181340aef25be59d5 . 30000)
+def EM2 (q 0x421f5fc9a21065445c96fdb91c0c1e2f2431741c72713b4b99ddcb316f31e9fc . 20000)
+def SIBLING 0xc9a41771a7568d2540bf660e0f9eb19bdedb7a1d30b2bf20f1e62970957225b5
+def SIG1 0x36f1ce2b4526a8265b4c06653c635fa001961ea3cab56bf37e822348e991f62f13047668d694439e882cde5573da9c8f3076b9f4c105b648fb316e84ec441cc7
+def SIG2 0x1231242a0ab61a37b05ee4c530b97d417ccfdeabc1f7b1e882b24c83eea634cda4ff914070e26362adaf2063fa4fdfde20417f8afd086c0f9f2e3f0916fb8fa4
+
+; member 1's withdrawal, all four checks pass, expect 1
+eval (FLEXMARK 0 (EM1) (SIBLING) (SIG1) 0 0)
+
+; member 2's signature does not satisfy member 1's earmark, expect an error
+eval (FLEXMARK 0 (EM1) (SIBLING) (SIG2) 0 0)
+
+; member 2's earmark is not at member 1's position in the tree, so the
+; overview check fails even with member 2's valid signature, expect an error
+eval (FLEXMARK 0 (EM2) (SIBLING) (SIG2) 0 0)
+
+; member 2's earmark with its correct path resolves to the committed
+; root, but this transaction only extracts for member 1, so the value
+; and new output checks both refuse it, expect an error
+eval (FLEXMARK 0 (EM2) (EMLEAF (EM1)) (SIG2) 0 0)
+
+; the member payout is not the recreated pool output, expect an error
+eval (FLEXMARK 0 (EM1) (SIBLING) (SIG1) 1 0)
+
+; -------------------------------------------------------------------
+; check isolation
+;
+; all is eager and the taproot check errors on a mismatch, so a spend
+; that fails several checks surfaces the error rather than a clean nil.
+; The two evals below pin the refusal reasons of the last two cases
+; above on the individual checks.
+
+; member 2's earmark at member 1's position does not resolve to the
+; committed root, expect nil
+eval (CHECKOVEM 0 (EM2) (SIBLING))
+
+; the pool output keeps 70000 of 100000, not enough for a 20000 sat
+; extraction, expect nil
+eval (CHECKVALUE 0 (EM2) (SIG2) 0)
+
+; -------------------------------------------------------------------
+; generation two
+;
+; The recreated pool coin from the spend above is itself a flexmark
+; coin. Its earmark tree holds the nil that replaced member 1's earmark
+; next to member 2's untouched one, and the same leaf script applies
+; because only the first element of the taproot merkle path changed.
+; Member 2 now withdraws from it, proving the covenant recurses.
+
+; member 2 withdraws from the recreated pool coin
+tx 020000000001010771902c991d887eb45bde0a8f794f4b3bd0d11af636d16a6ce54091ba8757cd0000000000ffffffff0250c3000000000000225120ba677caa5bd3e03aba9b64fbcdc031439dc5d9d04e4349727d759cbe6436a781384a000000000000225120421f5fc9a21065445c96fdb91c0c1e2f2431741c72713b4b99ddcb316f31e9fc021b626c6c3a20666c65786d61726b2077697468647261772064656d6f41c0774ae7f858a9411e5ef4246b70c65aac5649980be5c17891bbec17895da008cb97d1d5daa4bb3096d7db67ed6cdc0260851e5d9551a4a46b9fc94c0d8e82d27d00000000
+tx_in_idx 0
+tx_script 626c6c3a20666c65786d61726b2077697468647261772064656d6f
+utxos 70110100000000002251204587257b2ced9abd802a8a8f303f7a710deefbfdb53acb58170066ec28ce1269
+
+def SIBLING2 0xd1bb89e6f26132c794783251784893c042c068a77c05c75b75a239bb7212e512
+def SIG2B 0x30607b5b7158fd6a2014060bf1d4f67821298cfef97ad4eaadfc36e6ca0b58a00c682642a102ded8ba176d2a9d0c0644cc5272a08e4f515a92f8378aca33ad0b
+
+; member 2's withdrawal from the second generation coin, expect 1
+eval (FLEXMARK 0 (EM2) (SIBLING2) (SIG2B) 0 1)
+
+; member 1's spent earmark no longer resolves to the committed root of
+; the second generation tree, expect nil
+eval (CHECKOVEM 0 (EM1) (SIBLING2))
+
+; -------------------------------------------------------------------
+; compilation check
+;
+; program prints the compiled bll, and blleval runs that compiled
+; program through the bll evaluator rather than the symbll
+; interpreter, so the passing spend is checked under both semantics.
+; The environment is the balanced argument tree the compiler expects,
+; (((OV . EM) . (EMPATH . PARAMS)) . (OUTIDX . SPKODD)), with the same
+; values as the passing generation two eval above.
+
+program FLEXMARK
+
+; the compiled program accepts member 2's generation two withdrawal,
+; expect 1
+blleval @FLEXMARK (((0 . (0x421f5fc9a21065445c96fdb91c0c1e2f2431741c72713b4b99ddcb316f31e9fc . 20000)) . (0xd1bb89e6f26132c794783251784893c042c068a77c05c75b75a239bb7212e512 . 0x30607b5b7158fd6a2014060bf1d4f67821298cfef97ad4eaadfc36e6ca0b58a00c682642a102ded8ba176d2a9d0c0644cc5272a08e4f515a92f8378aca33ad0b)) . (0 . 1))
 
