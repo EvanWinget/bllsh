@@ -344,19 +344,55 @@ class Func(Pair):
         return "FN(%s,%s)" % (name, self.val2)
 
 class SerDeser:
-    """follows chia's serialization approach, which is very simple"""
+    """follows chia's serialization approach, which is very simple
+
+    The plain entry points run unmetered. The Charged entry points
+    spend per-element and per-byte rates against a budget before the
+    work they cover and return None once the budget latches, letting
+    the codec opcodes bound serialized size by charges alone."""
+
+    class _Exhausted(Exception):
+        """Raised by charge() to unwind the codec recursion once the
+        budget latches. Never escapes the Charged entry points."""
 
     def __init__(self, b):
         self.b, self.i = b, 0
+        self.budget = None
+        self.per_element = 0
+        self.per_byte = 0
+        self.emitted = 0
+
+    def charge(self, amount):
+        if self.budget is not None and not self.budget.charge(amount):
+            raise SerDeser._Exhausted
 
     @classmethod
     def Deserialize(cls, b : bytes) -> Element:
+        return cls(b)._DeserializeTop()
+
+    @classmethod
+    def DeserializeCharged(cls, b : bytes, budget, per_element, per_byte):
         deser = cls(b)
+        deser.budget = budget
+        deser.per_element = per_element
+        deser.per_byte = per_byte
         try:
-            el = deser._Deserialize()
-            if deser.i != len(deser.b):
+            return deser._DeserializeTop()
+        except SerDeser._Exhausted:
+            return None
+
+    def _DeserializeTop(self) -> Element:
+        try:
+            el = self._Deserialize()
+            if self.i != len(self.b):
                 el.deref()
-                return Error(f"incomplete deserialization: {deser.b[deser.i:].hex()}")
+                rest = self.b[self.i:]
+                # The message renders two hex characters per
+                # remaining input byte, so the charge runs at twice
+                # the per-byte rate to keep the rendered payload
+                # covered by the per-byte allocation rule.
+                self.charge(2 * self.per_byte * len(rest))
+                return Error(f"incomplete deserialization: {rest.hex()}")
         except EOFError:
             return Error("deserialization failed, insuffient data")
         return el
@@ -369,29 +405,45 @@ class SerDeser:
         self.i += n
         return self.b[i:self.i]
 
+    def read_atom(self, n):
+        # Availability is checked before the charge, so a truncated
+        # input reports insufficient data rather than exhaustion. The
+        # payload rate rides with the element charge, since decoding
+        # allocates what it reads.
+        if self.i + n > len(self.b):
+            raise EOFError
+        self.charge(self.per_element + self.per_byte * n)
+        return Atom(self.read(n))
+
     def _Deserialize(self) -> Element:
         b = self.read(1)
         if b[0] == 0x80:
+            self.charge(self.per_element)
             return Atom(0)
         elif b[0] < 0x80:
+            self.charge(self.per_element)
             return Atom(b)
         elif b[0] < 0xc0:
-            return Atom(self.read(b[0] & 0x3F))
+            return self.read_atom(b[0] & 0x3F)
         elif b[0] < 0xe0:
             n = ((b[0] & 0x1F) << 8) | self.read(1)[0]
-            return Atom(self.read(n))
+            return self.read_atom(n)
         elif b[0] < 0xf0:
             n = ((b[0] & 0x1F) << 16)
             n |= (self.read(1)[0] << 8)
             n |= self.read(1)[0]
-            return Atom(self.read(n))
+            return self.read_atom(n)
         elif b[0] == 0xff:
+            # The cons element's charge is spent at marker-read time,
+            # before either child is decoded, its construction
+            # happening once both children exist.
+            self.charge(self.per_element)
             l = self._Deserialize()
             if isinstance(l, Error):
                 return l
             try:
                 r = self._Deserialize()
-            except EOFError:
+            except (EOFError, SerDeser._Exhausted):
                 l.deref()
                 raise
             if isinstance(r, Error):
@@ -413,23 +465,60 @@ class SerDeser:
 
     @classmethod
     def Serialize(cls, e : Element) -> bytes | Error:
+        return cls(b'')._Serialize(e, None)
+
+    @classmethod
+    def SerializeCharged(cls, e : Element, budget, per_element, per_byte,
+                         max_size=None):
+        ser = cls(b'')
+        ser.budget = budget
+        ser.per_element = per_element
+        ser.per_byte = per_byte
+        try:
+            return ser._Serialize(e, max_size)
+        except SerDeser._Exhausted:
+            return None
+
+    def _Serialize(self, e : Element, max_size) -> bytes | Error:
+        # self.emitted counts output bytes in prefix order, the order
+        # the bytes land in the encoding, which is where each charge
+        # is spent and where the size cap is checked, even though the
+        # encoding is concatenated on the way back up.
         if isinstance(e, Cons):
-            l = cls.Serialize(e.val1)
+            # The 0xff marker: one element and one byte, charged and
+            # counted before the children are walked.
+            self.charge(self.per_element + self.per_byte)
+            self.emitted += 1
+            if max_size is not None and self.emitted > max_size:
+                return Error("element size limit exceeded")
+            l = self._Serialize(e.val1, max_size)
             if isinstance(l, Error):
                 return l
-            r = cls.Serialize(e.val2)
+            r = self._Serialize(e.val2, max_size)
             if isinstance(r, Error):
                 return r
             return b'\xff' + l + r
         elif isinstance(e, Atom):
-            if len(e.val2) == 0:
-                return b'\x80' # nil
-            elif len(e.val2) == 1 and e.val2[0] < 128:
-                return e.val2
-            elif len(e.val2) > 0xFFFFF:
+            n = len(e.val2)
+            if n > 0xFFFFF:
                 return Error("atom too large to serialize")
+            # Emitted size: one byte for nil and the sub-0x80
+            # singles, otherwise the payload plus its size prefix,
+            # charged before anything is built.
+            if n == 0 or (n == 1 and e.val2[0] < 128):
+                emitted = 1
             else:
-                return cls.sizebytes(len(e.val2)) + e.val2
+                emitted = n + (1 if n <= 0x3F else 2 if n <= 0x1FFF else 3)
+            self.charge(self.per_element + self.per_byte * emitted)
+            self.emitted += emitted
+            if max_size is not None and self.emitted > max_size:
+                return Error("element size limit exceeded")
+            if n == 0:
+                return b'\x80' # nil
+            elif n == 1 and e.val2[0] < 128:
+                return e.val2
+            else:
+                return self.sizebytes(n) + e.val2
         else:
             return Error("can only serialize atom/cons")
 

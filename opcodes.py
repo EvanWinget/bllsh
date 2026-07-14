@@ -344,37 +344,60 @@ class IntStateOpcode(Opcode):
         raise NotImplementedError
 
 class op_sha256(IntStateOpcode):
+    digest_size = 32
+
     @classmethod
     def initial_int_state(cls):
         return hashlib.sha256()
 
     @classmethod
     def update_state(cls, budget, int_state, arg):
+        # The argument charge precedes the shape check: rejecting a
+        # list is fold work too.
+        if not budget.charge(costs.HASH_ARG):
+            return None
         if not arg.is_atom():
             return Error("cannot hash list")
+        if not budget.charge(costs.HASH_PER_BYTE * arg.val1):
+            return None
         h = int_state.copy()
         h.update(arg.val2)
         return h
 
     @classmethod
     def final_state(cls, budget, int_state):
+        # One charge covers finalization, including the double-hash
+        # opcodes' second compression pass, plus the digest atom's
+        # allocation.
+        if not budget.charge(costs.HASH_BASE + costs.MALLOC_PER_BYTE * cls.digest_size):
+            return None
         return Atom(int_state.digest())
 
 class op_ripemd160(op_sha256):
+    digest_size = 20
+
     @classmethod
     def initial_int_state(cls):
         return ripemd160.hasher()
 
 class op_hash160(op_sha256):
+    digest_size = 20
+
     @classmethod
     def final_state(cls, budget, int_state):
+        if not budget.charge(costs.HASH_BASE + costs.MALLOC_PER_BYTE * cls.digest_size):
+            return None
         x = ripemd160.hasher()
         x.update(int_state.digest())
         return Atom(x.digest())
 
 class op_hash256(op_sha256):
+    digest_size = 32
+
     @classmethod
     def final_state(cls, budget, int_state):
+        if not budget.charge(costs.HASH_BASE + costs.MALLOC_PER_BYTE * cls.digest_size):
+            return None
         x = hashlib.sha256()
         x.update(int_state.digest())
         return Atom(x.digest())
@@ -857,17 +880,41 @@ class op_list_read(FixOpcode):
 
     @classmethod
     def operation(cls, budget, el):
+        if not budget.charge(costs.RD_BASE):
+            return None
         if not el.is_atom():
             return Error("rd: argument must be atom")
-        edeser = SerDeser.Deserialize(el.val2)
-        return edeser
+        # Charged inside the decoder, per element before it is built
+        # and per payload byte with the allocation share riding
+        # along, since decoding allocates what it reads.
+        return SerDeser.DeserializeCharged(el.val2, budget, costs.RD_PER_ELEMENT,
+                                           costs.RD_PER_BYTE + costs.MALLOC_PER_BYTE)
 
 class op_list_write(FixOpcode):
     min_args = max_args = 1
 
     @classmethod
+    def size_cap(cls):
+        # Overridable output size limit, applied inside the encoder
+        # at the same cumulative positions where libbll checks its
+        # element size limit. The base opcode is uncapped, a capped
+        # variant only overrides the value.
+        return None
+
+    @classmethod
     def operation(cls, budget, el):
-        eser = SerDeser.Serialize(el)
+        if not budget.charge(costs.WR_BASE):
+            return None
+        # Charged inside the encoder with early exit: serialized size
+        # follows structure, not memory, so a small shared tree can
+        # serialize exponentially large and only the charges bound
+        # the output. The per-byte rate carries the output atom's
+        # allocation share, headers included.
+        eser = SerDeser.SerializeCharged(el, budget, costs.WR_PER_ELEMENT,
+                                         costs.WR_PER_BYTE + costs.MALLOC_PER_BYTE,
+                                         max_size=cls.size_cap())
+        if eser is None:
+            return None
         if isinstance(eser, Error):
             return eser
         return Atom(eser)
@@ -893,6 +940,12 @@ class op_secp256k1_muladd(BinOpcode):
 
     @classmethod
     def binop(cls, budget, left, right):
+        # The fold charge covers the shape checks and the collection
+        # cons, before the checks so the shape errors pay it too. The
+        # curve work is charged per term in the finish walk, where it
+        # happens.
+        if not budget.charge(costs.MULADD_ARG):
+            return None
         if right.is_cons():
             scalar = right.val1
             if not right.val2.is_atom():
@@ -909,8 +962,15 @@ class op_secp256k1_muladd(BinOpcode):
     @staticmethod
     def finish(budget, intstate, state):
         assert intstate is None
+        if not budget.charge(costs.MULADD_BASE):
+            return None
         aps = []
         while isinstance(state, Cons):
+            # One charge per term, spent inside the walk immediately
+            # before the decode it covers, so a latch mid-walk leaves
+            # the remaining terms unexecuted and unpaid.
+            if not budget.charge(costs.MULADD_PER_TERM):
+                return None
             el, state = state.val1, state.val2
             if el.is_atom():
                 bscalar = el.val2
@@ -963,6 +1023,12 @@ class op_bip340_verify(FixOpcode):
         if not sig.is_atom() or (sig.val1 != 64 and sig.val1 != 0):
             return Error("invalid sig")
 
+        # Every shape check above rides the collection charge, so the
+        # nil-signature shortcut and the size errors stay flat. The
+        # curve work starts here and is charged as one unit, parse
+        # included.
+        if not budget.charge(costs.SIG_VERIFY):
+            return None
         r = verystable.core.key.verify_schnorr(key=pk.val2, sig=sig.val2, msg=m.val2)
         if not r:
             # must be an error to allow for batch verification
@@ -978,6 +1044,12 @@ class op_ecdsa_verify(FixOpcode):
         if not pk.is_atom() or (pk.val1 != 33 and pk.val1 != 65):
             return Error(f"invalid pubkey size {pk.val1}")
 
+        # The pubkey decompression runs before the nil-signature
+        # shortcut, so the parse carries its own charge ahead of it:
+        # an uncharged early return would hand out curve work below
+        # the machine rate.
+        if not budget.charge(costs.ECDSA_PARSE):
+            return None
         ecpk = verystable.core.key.ECPubKey()
         ecpk.set(pk.val2)
         if not ecpk.is_valid:
@@ -992,6 +1064,11 @@ class op_ecdsa_verify(FixOpcode):
         if not sig.is_atom():
             return Error("invalid sig")
 
+        # The remaining curve work is one unit, charged whether or
+        # not the signature parse ahead of it succeeds: a malformed
+        # signature pays the verification it asked for.
+        if not budget.charge(costs.SIG_VERIFY):
+            return None
         r = ecpk.verify_ecdsa(sig.val2, m.val2, low_s=False)
         if not r:
             # treat as an error for consistency with bip340_verify, and avoid
@@ -1026,6 +1103,17 @@ class op_bip342_txmsg(FixOpcode):
         if GLOBAL_UTXOS is None:
             return Error("bip342_txmsg: utxos not set")
 
+        # No-cache pricing: the charge covers recomputing the BIP341
+        # digests over the serialized transaction and spent outputs
+        # on every call, so any caching stays an optimization rather
+        # than a consensus assumption. The fixed share is the base
+        # plus the 32 byte message atom's allocation. The shape and
+        # unset errors above ride the collection charge.
+        data_size = len(GLOBAL_TX.serialize()) + sum(len(u.serialize()) for u in GLOBAL_UTXOS)
+        fixed = costs.TXMSG_BASE + costs.MALLOC_PER_BYTE * 32
+        if not budget.charge(fixed + costs.TXMSG_PER_BYTE * data_size):
+            return None
+
         annex = None
         if len(GLOBAL_TX.wit.vtxinwit) > 0:
             w = GLOBAL_TX.wit.vtxinwit[GLOBAL_TX_INPUT_IDX].scriptWitness.stack
@@ -1037,11 +1125,24 @@ class op_bip342_txmsg(FixOpcode):
 class op_tx(BinOpcode):
     @classmethod
     def binop(cls, budget, left, right):
+        # The argument charge covers the selector decode, the field
+        # dispatch and the fold's atom rebuild, charged first so
+        # every error path pays it.
+        if not budget.charge(costs.TX_ARG):
+            return None
         assert left.is_atom()
+        # Both selector decodes read every byte of their atom, so a
+        # wide non-minimal atom charges the scan rate ahead of its
+        # decode, a pair selector paying both scans in one charge.
         if right.is_atom():
+            if not budget.charge(costs.atom_scan(right.val1)):
+                return None
             code = right.as_int()
             which = None
         elif right.is_cons() and right.val1.is_atom() and right.val2.is_atom():
+            scans = costs.atom_scan(right.val1.val1) + costs.atom_scan(right.val2.val1)
+            if not budget.charge(scans):
+                return None
             code = right.val1.as_int()
             which = right.val2.as_int()
         else:
@@ -1049,9 +1150,19 @@ class op_tx(BinOpcode):
 
         result = cls.get_tx_info(code, which)
         if isinstance(result, Element):
+            # Selector 9's pair, or an error. Either way the
+            # accumulator is replaced, not extended, and machine
+            # integer width atoms carry no allocation charge.
             return result
         else:
             assert isinstance(result, bytes), f"invalid tx result {result}"
+            # The extended accumulator is a fresh atom: copy and
+            # allocation are charged on its whole width before it is
+            # built, which recopies the state every fold and so
+            # prices the quadratic self-extend shape, cat's rule.
+            joint = (costs.COPY_PER_BYTE + costs.MALLOC_PER_BYTE) * (left.val1 + len(result))
+            if not budget.charge(joint):
+                return None
             return Atom(left.val2 + result)
 
     @classmethod
