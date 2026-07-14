@@ -92,26 +92,26 @@ class Opcode:
         return None
 
     @classmethod
-    def argument(cls, int_state, state, arg): raise NotImplementedError
+    def argument(cls, budget, int_state, state, arg): raise NotImplementedError
 
     @classmethod
-    def finish(cls, int_state, state): raise NotImplementedError
+    def finish(cls, budget, int_state, state): raise NotImplementedError
 
 class BinOpcode(Opcode):
     """For opcodes that are essentially binary operators"""
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         raise NotImplementedError
 
     @final
     @classmethod
-    def argument(cls, int_state, state, arg):
+    def argument(cls, budget, int_state, state, arg):
         assert int_state is None
-        r = cls.binop(state, arg)
+        r = cls.binop(budget, state, arg)
         return (r, None)
 
     @staticmethod
-    def finish(int_state, state):
+    def finish(budget, int_state, state):
         assert int_state is None
         return state.bumpref()
 
@@ -119,7 +119,7 @@ class FixOpcode(Opcode):
     min_args = max_args = -1
 
     @classmethod
-    def operation(cls, *args):
+    def operation(cls, budget, *args):
         raise NotImplementedError
 
     @final
@@ -131,7 +131,7 @@ class FixOpcode(Opcode):
 
     @final
     @classmethod
-    def argument(cls, int_state, state, arg):
+    def argument(cls, budget, int_state, state, arg):
         assert int_state is None
         n, rest = cls.state_info(state)
         if n >= cls.max_args:
@@ -140,7 +140,7 @@ class FixOpcode(Opcode):
 
     @final
     @classmethod
-    def finish(cls, int_state, state):
+    def finish(cls, budget, int_state, state):
         assert int_state is None
         n, rest = cls.state_info(state)
         if n < cls.min_args:
@@ -149,18 +149,18 @@ class FixOpcode(Opcode):
         for _ in range(n):
             args.append(rest.val1)
             rest = rest.val2
-        return cls.operation(*(args[::-1]))
+        return cls.operation(budget, *(args[::-1]))
 
 class op_x(FixOpcode):
     min_args = 0
     max_args = 10
     @classmethod
-    def operation(cls, *args):
+    def operation(cls, budget, *args):
         return Error(f"Exception: {" ".join(str(a) for a in args)}")
 
 class op_add(BinOpcode):
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if left.is_atom() and right.is_atom():
             return Atom(left.as_int() + right.as_int())
         else:
@@ -172,7 +172,7 @@ class op_sub(BinOpcode):
         return Cons(Atom(0), Atom(0))
 
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if not right.is_atom():
             return Error("sub requires atoms")
         if left.is_cons() and left.val1.is_nil():
@@ -183,7 +183,7 @@ class op_sub(BinOpcode):
             return Atom(left.as_int() - right.as_int())
 
     @staticmethod
-    def finish(intstate, state):
+    def finish(budget, intstate, state):
         if state.is_cons():
             return Atom(0 - state.val2.as_int())
         else:
@@ -195,7 +195,7 @@ class op_mul(BinOpcode):
         return Atom(1)
 
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if left.is_atom() and right.is_atom():
             return Atom(left.as_int() * right.as_int())
         else:
@@ -205,7 +205,7 @@ class op_mod(FixOpcode):
     min_args = max_args = 2
 
     @classmethod
-    def operation(cls, num, den):
+    def operation(cls, budget, num, den):
         if not num.is_atom() or not den.is_atom():
             return Error("mod requires atoms")
         if den.as_int() == 0:
@@ -218,7 +218,7 @@ class op_lt_num(BinOpcode):
         return Atom(1)
 
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if left.is_nil():
             # failed already
             return left.bumpref()
@@ -230,7 +230,7 @@ class op_lt_num(BinOpcode):
         return Cons(Atom(1), right.bumpref())
 
     @staticmethod
-    def finish(intstate, state):
+    def finish(budget, intstate, state):
         if state.is_atom():
             return state.bumpref()
         else:
@@ -241,7 +241,7 @@ class op_i(FixOpcode):
     max_args = 3
 
     @classmethod
-    def operation(cls, c, t=None, e=None):
+    def operation(cls, budget, c, t=None, e=None):
         if c.is_nil():
             return e.bumpref() if e is not None else c.bumpref()
         else:
@@ -250,9 +250,9 @@ class op_i(FixOpcode):
 class IntStateOpcode(Opcode):
     @classmethod
     @final
-    def argument(cls, int_state, state, arg):
+    def argument(cls, budget, int_state, state, arg):
         assert state.is_nil()
-        next_state = cls.update_state(int_state, arg)
+        next_state = cls.update_state(budget, int_state, arg)
         if isinstance(next_state, Element):
             assert next_state.is_error()
             return (next_state, None)
@@ -260,16 +260,16 @@ class IntStateOpcode(Opcode):
 
     @classmethod
     @final
-    def finish(cls, int_state, state):
+    def finish(cls, budget, int_state, state):
        assert state.is_nil()
-       return cls.final_state(int_state)
+       return cls.final_state(budget, int_state)
 
     @classmethod
-    def update_state(cls, int_state, arg):
+    def update_state(cls, budget, int_state, arg):
         raise NotImplementedError
 
     @classmethod
-    def final_state(cls, int_state):
+    def final_state(cls, budget, int_state):
         raise NotImplementedError
 
 class op_sha256(IntStateOpcode):
@@ -278,7 +278,7 @@ class op_sha256(IntStateOpcode):
         return hashlib.sha256()
 
     @classmethod
-    def update_state(cls, int_state, arg):
+    def update_state(cls, budget, int_state, arg):
         if not arg.is_atom():
             return Error("cannot hash list")
         h = int_state.copy()
@@ -286,7 +286,7 @@ class op_sha256(IntStateOpcode):
         return h
 
     @classmethod
-    def final_state(cls, int_state):
+    def final_state(cls, budget, int_state):
         return Atom(int_state.digest())
 
 class op_ripemd160(op_sha256):
@@ -296,28 +296,28 @@ class op_ripemd160(op_sha256):
 
 class op_hash160(op_sha256):
     @classmethod
-    def final_state(cls, int_state):
+    def final_state(cls, budget, int_state):
         x = ripemd160.hasher()
         x.update(int_state.digest())
         return Atom(x.digest())
 
 class op_hash256(op_sha256):
     @classmethod
-    def final_state(cls, int_state):
+    def final_state(cls, budget, int_state):
         x = hashlib.sha256()
         x.update(int_state.digest())
         return Atom(x.digest())
 
 class op_rc(BinOpcode):
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if left.is_cons():
             return Cons(left.val1.bumpref(), Cons(right.bumpref(), left.val2.bumpref()))
         else:
             return Cons(left.bumpref(), right.bumpref())
 
     @classmethod
-    def finish(cls, intstate, state):
+    def finish(cls, budget, intstate, state):
         if state.is_cons():
             return state.val2.bumpref()
         else:
@@ -325,7 +325,7 @@ class op_rc(BinOpcode):
 
 class op_b(BinOpcode):
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if left.is_nil():
             return Cons(Cons(right.bumpref(), Atom(0)), Atom(1))
         else:
@@ -342,7 +342,7 @@ class op_b(BinOpcode):
             return Cons(Cons(v, m.bumpref()), Atom(n_next))
 
     @classmethod
-    def finish(cls, intstate, state):
+    def finish(cls, budget, intstate, state):
         if state.is_nil():
             return state.bumpref()
         else:
@@ -359,7 +359,7 @@ class op_h(FixOpcode):
     min_args = max_args = 1
 
     @classmethod
-    def operation(cls, lst):
+    def operation(cls, budget, lst):
         if not lst.is_cons():
             return Error("not a list")
         return lst.val1.bumpref()
@@ -368,7 +368,7 @@ class op_t(FixOpcode):
     min_args = max_args = 1
 
     @classmethod
-    def operation(cls, lst):
+    def operation(cls, budget, lst):
         if not lst.is_cons():
             return Error("not a list")
         return lst.val2.bumpref()
@@ -377,13 +377,13 @@ class op_l(FixOpcode):
     min_args = max_args = 1
 
     @classmethod
-    def operation(cls, lst):
+    def operation(cls, budget, lst):
         return Atom(1 if lst.is_cons() else 0)
 
 class op_nand(BinOpcode):
     # aka is any false?
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if right.is_nil():
             return Atom(1)
         else:
@@ -397,7 +397,7 @@ class op_and(BinOpcode):
         return Atom(1)
 
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if right.is_nil():
             return Atom(0)
         else:
@@ -407,7 +407,7 @@ class op_or(BinOpcode):
     # aka are any true?
 
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if not right.is_nil():
             return Atom(1)
         else:
@@ -415,7 +415,7 @@ class op_or(BinOpcode):
 
 class op_or_bytes(BinOpcode):
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if not right.is_atom():
             return Error("or_bytes: argument must be atom")
         out = bytearray(max(left.val1, right.val1))
@@ -427,7 +427,7 @@ class op_or_bytes(BinOpcode):
 
 class op_xor_bytes(BinOpcode):
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if not right.is_atom():
             return Error("xor_bytes: argument must be atom")
         out = bytearray(max(left.val1, right.val1))
@@ -439,7 +439,7 @@ class op_xor_bytes(BinOpcode):
 
 class op_and_bytes(BinOpcode):
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if not right.is_atom():
             return Error("and_bytes: argument must be atom")
         if left.is_nil():
@@ -452,7 +452,7 @@ class op_and_bytes(BinOpcode):
 
 class op_nand_bytes(BinOpcode):
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if not right.is_atom():
             return Error("nand_bytes: argument must be atom")
         out = bytearray((255 for _ in range(max(left.val1, right.val1))))
@@ -468,7 +468,7 @@ class op_shift(FixOpcode):
     min_args = max_args = 2
 
     @classmethod
-    def operation(cls, inp, n):
+    def operation(cls, budget, inp, n):
         if not isinstance(inp, Atom) or not isinstance(n, Atom):
             return Error("shift: expects atomic arguments")
         delta = n.as_int()
@@ -499,7 +499,7 @@ class op_eq(BinOpcode):
         return Atom(1)
 
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if left.is_nil():
             # failed already
             return left.bumpref()
@@ -517,7 +517,7 @@ class op_eq(BinOpcode):
                 return left.bumpref()
 
     @staticmethod
-    def finish(intstate, state):
+    def finish(budget, intstate, state):
         if state.is_cons():
             return state.val2.bumpref()
         else:
@@ -529,7 +529,7 @@ class op_bigeq(BinOpcode):
         return Atom(1)
 
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if left.is_nil():
             # failed already
             return left.bumpref()
@@ -552,7 +552,7 @@ class op_bigeq(BinOpcode):
             return left.bumpref()
 
     @staticmethod
-    def finish(intstate, state):
+    def finish(budget, intstate, state):
         if state.is_cons():
             return state.val2.bumpref()
         else:
@@ -560,14 +560,14 @@ class op_bigeq(BinOpcode):
 
 class op_strlen(BinOpcode):
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if not right.is_atom():
             return Error(f"strlen: not an atom {right}")
         return Atom(left.as_int() + len(right.val2))
 
 class op_cat(BinOpcode):
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if not right.is_atom():
             return Error(f"cat: not an atom {right}")
         return Atom(left.val2 + right.val2)
@@ -577,7 +577,7 @@ class op_substr(FixOpcode):
     max_args = 3
 
     @classmethod
-    def operation(cls, el=None, start=None, end=None):
+    def operation(cls, budget, el=None, start=None, end=None):
         if el is None:
             return Atom(0)
         if not el.is_atom():
@@ -610,7 +610,7 @@ class op_lt_str(BinOpcode):
         return Atom(1)
 
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if left.is_nil():
             # failed already
             return left.bumpref()
@@ -622,7 +622,7 @@ class op_lt_str(BinOpcode):
         return Cons(Atom(1), right.bumpref())
 
     @staticmethod
-    def finish(intstate, state):
+    def finish(budget, intstate, state):
         if state.is_atom():
             return state.bumpref()
         else:
@@ -656,7 +656,7 @@ class op_list_read(FixOpcode):
     min_args = max_args = 1
 
     @classmethod
-    def operation(cls, el):
+    def operation(cls, budget, el):
         if not el.is_atom():
             return Error("rd: argument must be atom")
         edeser = SerDeser.Deserialize(el.val2)
@@ -666,7 +666,7 @@ class op_list_write(FixOpcode):
     min_args = max_args = 1
 
     @classmethod
-    def operation(cls, el):
+    def operation(cls, budget, el):
         eser = SerDeser.Serialize(el)
         if isinstance(eser, Error):
             return eser
@@ -692,7 +692,7 @@ class op_secp256k1_muladd(BinOpcode):
     """
 
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         if right.is_cons():
             scalar = right.val1
             if not right.val2.is_atom():
@@ -707,7 +707,7 @@ class op_secp256k1_muladd(BinOpcode):
         return Cons(right.bumpref(), left.bumpref())
 
     @staticmethod
-    def finish(intstate, state):
+    def finish(budget, intstate, state):
         assert intstate is None
         aps = []
         while isinstance(state, Cons):
@@ -751,7 +751,7 @@ class op_bip340_verify(FixOpcode):
     min_args = max_args = 3
 
     @classmethod
-    def operation(cls, pk, m, sig):
+    def operation(cls, budget, pk, m, sig):
         if not pk.is_atom() or pk.val1 != 32:
             return Error(f"invalid pubkey {pk}")
         if not m.is_atom() or m.val1 != 32:
@@ -774,7 +774,7 @@ class op_ecdsa_verify(FixOpcode):
     min_args = max_args = 3
 
     @classmethod
-    def operation(cls, pk, m, sig):
+    def operation(cls, budget, pk, m, sig):
         if not pk.is_atom() or (pk.val1 != 33 and pk.val1 != 65):
             return Error(f"invalid pubkey size {pk.val1}")
 
@@ -805,7 +805,7 @@ class op_bip342_txmsg(FixOpcode):
     max_args = 1
 
     @classmethod
-    def operation(cls, sighash=None):
+    def operation(cls, budget, sighash=None):
         global GLOBAL_TX, GLOBAL_TX_INPUT_IDX, GLOBAL_TX_SCRIPT, GLOBAL_UTXOS
 
         if sighash is None:
@@ -836,7 +836,7 @@ class op_bip342_txmsg(FixOpcode):
 
 class op_tx(BinOpcode):
     @classmethod
-    def binop(cls, left, right):
+    def binop(cls, budget, left, right):
         assert left.is_atom()
         if right.is_atom():
             code = right.as_int()

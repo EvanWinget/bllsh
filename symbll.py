@@ -8,6 +8,7 @@ import functools
 from dataclasses import dataclass, field
 from typing import List, Optional, Any
 
+from costs import Budget, DEFAULT_BUDGET
 from element import ALLOCATOR, Element, SExpr, Atom, Cons, Error, Func, FuncClass, Symbol
 from opcodes import SExpr_FUNCS, Op_FUNCS, Opcode
 from bll import OpAtom
@@ -414,6 +415,10 @@ class WorkItem:
     continuations: List[Continuation]
     dummylocalsyms: SymbolTable
     costleft: int = 100000
+    # The shared opcode machinery charges its work to a budget. The
+    # symbolic evaluator is off-consensus tooling, so it hands over
+    # one too large to exhaust and never reads it back.
+    budget: Budget = field(default_factory=lambda: Budget(DEFAULT_BUDGET))
 
     @classmethod
     def begin(cls, sexpr, syms):

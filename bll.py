@@ -8,6 +8,7 @@ import functools
 from dataclasses import dataclass, field
 from typing import Type, List, Optional, Any
 
+from costs import Budget, DEFAULT_BUDGET
 from element import Element, SExpr, Atom, Cons, Error, Func, FuncClass
 from opcodes import SExpr_FUNCS, Op_FUNCS, Opcode
 from workitem import fn_fin, fn_quote, fn_op, fn_partial
@@ -21,7 +22,7 @@ SpecialBLLOps = {
     'partial': 3,
 }
 
-def ResolveOpcode(op : Element) -> Optional[Func]:
+def ResolveOpcode(op : Element, budget : Budget) -> Optional[Func]:
     if not isinstance(op, Atom):
         return None
     opnum = op.as_int()
@@ -48,7 +49,7 @@ def OpAtom(opcode : str) -> Optional[Atom]:
 
 ####
 
-def ResolveEnv(baseenv : Element, idx : int) -> Element:
+def ResolveEnv(baseenv : Element, idx : int, budget : Budget) -> Element:
     idxstart = idx
     env = baseenv
     while idx > 1:
@@ -112,7 +113,7 @@ class fn_blleval(FuncClass):
         elif isinstance(args, Atom):
             v = args.as_int()
             if v >= 1:
-                envarg = ResolveEnv(env, v)
+                envarg = ResolveEnv(env, v, workitem.budget)
                 args.deref()
             else:
                 envarg = args
@@ -120,7 +121,7 @@ class fn_blleval(FuncClass):
             workitem.fin_value(envarg)
         elif isinstance(args, Cons):
             op, args = args.steal_children()
-            opfunc = ResolveOpcode(op)
+            opfunc = ResolveOpcode(op, workitem.budget)
             if opfunc is None:
                 Element.deref_all(args, env)
                 workitem.error(f"invalid opcode {op}")
@@ -200,10 +201,13 @@ class Continuation:
 @dataclass
 class WorkItem:
     continuations: List[Continuation]
+    budget: Budget
 
     @classmethod
-    def begin(cls, sexpr : Element, env : Element) -> WorkItem:
-        wi = WorkItem(continuations=[])
+    def begin(cls, sexpr : Element, env : Element, budget : Optional[Budget] = None) -> WorkItem:
+        if budget is None:
+            budget = Budget(DEFAULT_BUDGET)
+        wi = WorkItem(continuations=[], budget=budget)
         wi.eval_arg(sexpr, env)
         return wi
 
@@ -253,17 +257,26 @@ class WorkItem:
     def finished(self) -> bool:
         return len(self.continuations) == 1 and self.continuations[0].fn.val1[0] == fn_fin
 
+    def unwind(self) -> None:
+        for c in self.continuations:
+            c.deref()
+        self.continuations = []
+
     def get_result(self) -> Element:
         assert self.finished()
         r = self.continuations[0].args.bumpref()
         self.continuations.pop().deref()
         return r
 
-def eval(sexpr : Element, globalenv : Element) -> Element:
-    wi = WorkItem.begin(sexpr, globalenv)
+def eval(sexpr : Element, globalenv : Element, budget : Optional[Budget] = None) -> Element:
+    wi = WorkItem.begin(sexpr, globalenv, budget)
 
-    while not wi.finished():
+    while not wi.finished() and not wi.budget.exhausted:
         wi.step()
+
+    if wi.budget.exhausted:
+        wi.unwind()
+        return Error("budget exhausted")
 
     return wi.get_result()
 

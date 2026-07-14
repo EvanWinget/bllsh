@@ -37,9 +37,9 @@ class fn_op():
         self.opcls = opcls
         self.opintstate = opintstate
 
-    def feed(self, state : Element, value : Element) -> Element:
+    def feed(self, state : Element, value : Element, budget) -> Element:
         # XXX state/value should be handed over to the Opcode class
-        (newst, newintst) = self.opcls.argument(self.opintstate, state, value)
+        (newst, newintst) = self.opcls.argument(budget, self.opintstate, state, value)
         Element.deref_all(state, value)
         if isinstance(newst, Error):
             return newst
@@ -59,7 +59,7 @@ class fn_op():
 
     def step(self, state : Element, args : Element, env : Any, workitem : Any) -> None:
         if args.is_nil():
-            f = self.opcls.finish(self.opintstate, state)  # XXX should consider state owned
+            f = self.opcls.finish(workitem.budget, self.opintstate, state)  # XXX should consider state owned
             env.deref()
             Element.deref_all(state, args)
             workitem.fin_value(f)
@@ -74,7 +74,7 @@ class fn_op():
 
     def feedback(self, state : Element, value : Element, args : Element, env : Any, workitem : Any) -> None:
         assert not isinstance(value, Error)
-        fed = self.feed(state, value)
+        fed = self.feed(state, value, workitem.budget)
         if isinstance(fed, Error):
             env.deref()
             args.deref()
@@ -135,7 +135,7 @@ class fn_partial(FuncClass):
         else:
             assert isinstance(state, Func) and issubclass(state.val1[0], fn_op)
             opobj, opstate = state.steal_func()
-            nextfunc = opobj.feed(opstate, value)
+            nextfunc = opobj.feed(opstate, value, workitem.budget)
             if nextfunc.is_error():
                 env.deref()
                 args.deref()
