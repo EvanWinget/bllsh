@@ -170,8 +170,15 @@ class op_x(FixOpcode):
 class op_add(BinOpcode):
     @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.ARITH_ARG):
+            return None
         if left.is_atom() and right.is_atom():
-            return Atom(left.as_int() + right.as_int())
+            if not budget.charge(costs.ARITH_PER_BYTE * (left.val1 + right.val1)):
+                return None
+            enc = int_to_bytes(left.as_int() + right.as_int())
+            if not budget.charge(costs.MALLOC_PER_BYTE * len(enc)):
+                return None
+            return Atom(enc)
         else:
             return Error("add requires atoms")
 
@@ -182,19 +189,35 @@ class op_sub(BinOpcode):
 
     @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.ARITH_ARG):
+            return None
         if not right.is_atom():
             return Error("sub requires atoms")
+        # The marker fold stores the minuend without scanning it, so
+        # it carries the base charge alone.
         if left.is_cons() and left.val1.is_nil():
             return Cons(Atom(1), right.bumpref())
-        elif left.is_cons():
-            return Atom(left.val2.as_int() - right.as_int())
-        else:
-            return Atom(left.as_int() - right.as_int())
+        minuend = left.val2 if left.is_cons() else left
+        if not budget.charge(costs.ARITH_PER_BYTE * (minuend.val1 + right.val1)):
+            return None
+        enc = int_to_bytes(minuend.as_int() - right.as_int())
+        if not budget.charge(costs.MALLOC_PER_BYTE * len(enc)):
+            return None
+        return Atom(enc)
 
     @staticmethod
     def finish(budget, intstate, state):
         if state.is_cons():
-            return Atom(0 - state.val2.as_int())
+            # The negation re-encodes the stored minuend: base, scan
+            # and allocation charges like any other fold of this
+            # family.
+            stored = state.val2
+            if not budget.charge(costs.ARITH_ARG + costs.ARITH_PER_BYTE * stored.val1):
+                return None
+            enc = int_to_bytes(0 - stored.as_int())
+            if not budget.charge(costs.MALLOC_PER_BYTE * len(enc)):
+                return None
+            return Atom(enc)
         else:
             return state.bumpref()
 
@@ -205,8 +228,21 @@ class op_mul(BinOpcode):
 
     @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.ARITH_ARG):
+            return None
         if left.is_atom() and right.is_atom():
-            return Atom(left.as_int() * right.as_int())
+            # The schoolbook product runs one pass per limb of one
+            # operand over the other: the divided byte product plus
+            # a per-pass overhead linear in the wider operand.
+            work = (costs.ARITH_PER_BYTE * (left.val1 + right.val1)
+                    + costs.MULDIV_LIMB_PER_BYTE * max(left.val1, right.val1)
+                    + (left.val1 * right.val1) // costs.MUL_PRODUCT_DIV)
+            if not budget.charge(work):
+                return None
+            enc = int_to_bytes(left.as_int() * right.as_int())
+            if not budget.charge(costs.MALLOC_PER_BYTE * len(enc)):
+                return None
+            return Atom(enc)
         else:
             return Error("mul requires atoms")
 
@@ -215,11 +251,26 @@ class op_mod(FixOpcode):
 
     @classmethod
     def operation(cls, budget, num, den):
+        if not budget.charge(costs.MOD_BASE):
+            return None
         if not num.is_atom() or not den.is_atom():
             return Error("mod requires atoms")
+        # Charged before the divisor decode, so the by-zero error
+        # pays the full division charge: the zero test itself reads
+        # the whole operand. Long division runs one pass per quotient
+        # limb, the same divided-product-plus-limb shape as
+        # multiplication.
+        work = (costs.MOD_PER_BYTE * (num.val1 + den.val1)
+                + costs.MULDIV_LIMB_PER_BYTE * max(num.val1, den.val1)
+                + (num.val1 * den.val1) // costs.MUL_PRODUCT_DIV)
+        if not budget.charge(work):
+            return None
         if den.as_int() == 0:
             return Error("mod: attempted div by 0")
-        return Atom(num.as_int() % den.as_int())
+        enc = int_to_bytes(num.as_int() % den.as_int())
+        if not budget.charge(costs.MALLOC_PER_BYTE * len(enc)):
+            return None
+        return Atom(enc)
 
 class op_lt_num(BinOpcode):
     @staticmethod
@@ -455,8 +506,13 @@ class op_or(BinOpcode):
 class op_or_bytes(BinOpcode):
     @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.BITWISE_ARG):
+            return None
         if not right.is_atom():
             return Error("or_bytes: argument must be atom")
+        wider = (costs.COPY_PER_BYTE + costs.MALLOC_PER_BYTE) * max(left.val1, right.val1)
+        if not budget.charge(wider):
+            return None
         out = bytearray(max(left.val1, right.val1))
         for i,e in enumerate(left.val2):
             out[i] = e
@@ -467,8 +523,13 @@ class op_or_bytes(BinOpcode):
 class op_xor_bytes(BinOpcode):
     @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.BITWISE_ARG):
+            return None
         if not right.is_atom():
             return Error("xor_bytes: argument must be atom")
+        wider = (costs.COPY_PER_BYTE + costs.MALLOC_PER_BYTE) * max(left.val1, right.val1)
+        if not budget.charge(wider):
+            return None
         out = bytearray(max(left.val1, right.val1))
         for i,e in enumerate(left.val2):
             out[i] = e
@@ -479,11 +540,18 @@ class op_xor_bytes(BinOpcode):
 class op_and_bytes(BinOpcode):
     @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.BITWISE_ARG):
+            return None
         if not right.is_atom():
             return Error("and_bytes: argument must be atom")
+        # The nil-state passthrough copies and allocates nothing, so
+        # it carries no size charge.
         if left.is_nil():
             return right.bumpref()
         else:
+            wider = (costs.COPY_PER_BYTE + costs.MALLOC_PER_BYTE) * max(left.val1, right.val1)
+            if not budget.charge(wider):
+                return None
             out = bytearray((0 for _ in range(max(left.val1, right.val1))))
             for i,(el, er) in enumerate(zip(left.val2, right.val2)):
                 out[i] = el & er
@@ -492,8 +560,13 @@ class op_and_bytes(BinOpcode):
 class op_nand_bytes(BinOpcode):
     @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.BITWISE_ARG):
+            return None
         if not right.is_atom():
             return Error("nand_bytes: argument must be atom")
+        wider = (costs.COPY_PER_BYTE + costs.MALLOC_PER_BYTE) * max(left.val1, right.val1)
+        if not budget.charge(wider):
+            return None
         out = bytearray((255 for _ in range(max(left.val1, right.val1))))
         for i,e in enumerate(left.val2):
             out[i] = (e ^ 255)
@@ -507,12 +580,39 @@ class op_shift(FixOpcode):
     min_args = max_args = 2
 
     @classmethod
+    def size_cap(cls):
+        # Overridable output size limit for left shifts, checked once
+        # the output size bound is known, before the byte charge. The
+        # base opcode is uncapped, a capped variant only overrides
+        # the value so the charge sequence lives here once.
+        return None
+
+    @classmethod
     def operation(cls, budget, inp, n):
+        if not budget.charge(costs.SHIFT_BASE):
+            return None
         if not isinstance(inp, Atom) or not isinstance(n, Atom):
             return Error("shift: expects atomic arguments")
+        if not budget.charge(costs.atom_scan(n.val1)):
+            return None
         delta = n.as_int()
         if delta == 0:
             return inp.bumpref()
+
+        # The output size bound: prepended zeros, one push per input
+        # byte and the final overflow byte for a left shift, at most
+        # one byte per input byte plus the overflow byte for a right
+        # shift. The bound is what gets charged, not the emitted
+        # length.
+        if delta > 0:
+            out_size = delta // 8 + inp.val1 + 1
+            cap = cls.size_cap()
+            if cap is not None and out_size > cap:
+                return Error("element size limit exceeded")
+        else:
+            out_size = inp.val1 + 1
+        if not budget.charge((costs.COPY_PER_BYTE + costs.MALLOC_PER_BYTE) * out_size):
+            return None
 
         bb = bytearray(delta//8) if delta > 0 else bytearray()
         overflow = 0
@@ -627,9 +727,28 @@ class op_strlen(BinOpcode):
 
 class op_cat(BinOpcode):
     @classmethod
+    def size_cap(cls):
+        # Overridable output size limit, checked between the shape
+        # check and the byte charge. The base opcode is uncapped, a
+        # capped variant only overrides the value so the charge
+        # sequence lives here once.
+        return None
+
+    @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.CAT_ARG):
+            return None
         if not right.is_atom():
             return Error(f"cat: not an atom {right}")
+        cap = cls.size_cap()
+        if cap is not None and left.val1 + right.val1 > cap:
+            return Error("element size limit exceeded")
+        # The whole state is recopied every fold, so charging the
+        # copy and the allocation per fold prices the quadratic
+        # self-append shape with no special case.
+        joint = (costs.COPY_PER_BYTE + costs.MALLOC_PER_BYTE) * (left.val1 + right.val1)
+        if not budget.charge(joint):
+            return None
         return Atom(left.val2 + right.val2)
 
 class op_substr(FixOpcode):
@@ -638,6 +757,8 @@ class op_substr(FixOpcode):
 
     @classmethod
     def operation(cls, budget, el=None, start=None, end=None):
+        if not budget.charge(costs.SUBSTR_BASE):
+            return None
         if el is None:
             return Atom(0)
         if not el.is_atom():
@@ -647,22 +768,35 @@ class op_substr(FixOpcode):
             return el.bumpref()
         if not start.is_atom():
             return Error("substr: start must be atom")
+        if not budget.charge(costs.atom_scan(start.val1)):
+            return None
         start = start.as_int()
 
-        if end is not None and not end.is_atom(): 
+        if end is not None and not end.is_atom():
             return Error("substr: end must be atom")
         if end is None:
             end = el.val1
         else:
+            if not budget.charge(costs.atom_scan(end.val1)):
+                return None
             end = end.as_int()
 
+        # The identity and nil shortcuts copy and allocate nothing,
+        # so only the copied range carries a size charge.
         if start == 0 and end >= el.val1:
             return el.bumpref()
 
         if start > el.val1:
             return Atom(0)
 
-        return Atom(el.val2[start:end])
+        low = max(start + el.val1, 0) if start < 0 else start
+        high = max(end + el.val1, 0) if end < 0 else min(end, el.val1)
+        if low >= high:
+            return Atom(0)
+        copied = (costs.COPY_PER_BYTE + costs.MALLOC_PER_BYTE) * (high - low)
+        if not budget.charge(copied):
+            return None
+        return Atom(el.val2[low:high])
 
 class op_lt_str(BinOpcode):
     @staticmethod
