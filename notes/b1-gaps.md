@@ -100,7 +100,9 @@ design work, for SPEC.md, or for upstream discussion. Recorded
     context generator (`examples/gen-test-context.py`) so every hex
     constant is reproducible, but a marker convention a runner could
     check (and that libbll's differential harness could consume) is the
-    obvious next step.
+    obvious next step. Addressed at B1 close-out: `; expect:` markers
+    on every eval and blleval in the corpus examples, checked by
+    `examples/run-examples.py`.
 
 13. **Piping an example into the repl double-runs commands.**
     `cmd.Cmd` repeats the last command on every blank input line, so

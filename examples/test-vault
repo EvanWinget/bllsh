@@ -23,16 +23,12 @@
 ; The signatures commit to the transaction with SIGHASH_DEFAULT.
 ;
 ; Run with
+;   python3 examples/run-examples.py examples/test-vault
+; which checks every "; expect:" marker below, or interactively with
 ;   echo "import examples/test-vault" | ./bllsh
 ; Piping the file itself into the repl re-runs each command at every
 ; blank line (cmd.Cmd repeats the last command on an empty input line),
 ; the import command skips blank lines.
-;
-; Expected results, in order: 1 (delay check alone), 1, 1, 1 and 1
-; (the same spends through the compiled program), error (wrong key for
-; the hot path), error (wrong key for the clawback), nil (delay check
-; alone on the immature input), error (immature delay), 1, then the
-; compiled program.
 
 def COLDPK 0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
 def HOTPK 0xc6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5
@@ -56,26 +52,33 @@ utxos a086010000000000225120602c586c4a138b58be8f825a54815106f8020a928d2755f69d69
 def SIGHOTA 0x47000aeb0132b9ae594ae887caea8f511ec6c40fe1ec6277f14793441fb94fa11349674decfc99c68b40d896b220282c4e8ebb7a1a12e74af1166369649c11b9
 def SIGCOLDA 0xbe373f57a2a8839ffca71bc8d5d0418a2c0bc243c976f36bd29b3bf976a81d0773ccaa2e7a26ae6de74401a8e0519257b41b59ab0880f16adff58c262cb8524a
 
-; the delay check alone accepts this input's nSequence of 144, expect 1
+; the delay check alone accepts this input's nSequence of 144
 eval (CHECKDELAY)
+; expect: 1
 
-; hot spend with a mature delay, expect 1
+; hot spend with a mature delay
 eval (VAULT 0 (SIGHOTA))
+; expect: 1
 
-; clawback works on the same transaction, expect 1
+; clawback works on the same transaction
 eval (VAULT 1 (SIGCOLDA))
+; expect: 1
 
 ; the same two spends through the compiled program instead of the
 ; symbll interpreter, the environment is the compiler's argument tree
-; (MODE . SIG), expect 1 and 1
+; (MODE . SIG)
 blleval @VAULT (0 . 0x47000aeb0132b9ae594ae887caea8f511ec6c40fe1ec6277f14793441fb94fa11349674decfc99c68b40d896b220282c4e8ebb7a1a12e74af1166369649c11b9)
+; expect: 1
 blleval @VAULT (1 . 0xbe373f57a2a8839ffca71bc8d5d0418a2c0bc243c976f36bd29b3bf976a81d0773ccaa2e7a26ae6de74401a8e0519257b41b59ab0880f16adff58c262cb8524a)
+; expect: 1
 
-; the cold signature does not authorize the hot path, expect an error
+; the cold signature does not authorize the hot path
 eval (VAULT 0 (SIGCOLDA))
+; expect: ERR(bip340_verify: invalid, non-empty signature)
 
-; the hot signature does not authorize the clawback, expect an error
+; the hot signature does not authorize the clawback
 eval (VAULT 1 (SIGHOTA))
+; expect: ERR(bip340_verify: invalid, non-empty signature)
 
 ; -------------------------------------------------------------------
 ; context B: premature hot spend, only 10 blocks of delay
@@ -88,14 +91,18 @@ utxos a086010000000000225120602c586c4a138b58be8f825a54815106f8020a928d2755f69d69
 def SIGHOTB 0xf50e475b1ca5579f1120c363947ea38a2abc8a252db06bf35920c975ba28452b6d564b71cb4707889208266dceef03cd3ec1dc87b4ded9ae57e4aac1eb718e9e
 def SIGCOLDB 0xd37da6d5cf4af92a394c081d221c20e3b40ecd2e58649b7c266985093fcc6d333d2cb73bd5a238f7ef6536b3d87bffd424fcb462eab7c401041467b9a6ff50ec
 
-; the delay check alone refuses this input's nSequence of 10, expect nil
+; the delay check alone refuses this input's nSequence of 10
 eval (CHECKDELAY)
+; expect: nil
 
-; the hot path refuses the immature delay, expect an error
+; the hot path refuses the immature delay, the error carries the
+; vault's refusal message as hex
 eval (VAULT 0 (SIGHOTB))
+; expect: ERR(Exception: 0x7661756c743a207370656e64206e6f7420617574686f72697a6564)
 
-; the clawback does not wait, expect 1
+; the clawback does not wait
 eval (VAULT 1 (SIGCOLDB))
+; expect: 1
 
 ; -------------------------------------------------------------------
 ; compilation check

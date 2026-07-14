@@ -15,6 +15,8 @@
 ;   python3 examples/gen-test-context.py flexmarks
 ;
 ; Run with
+;   python3 examples/run-examples.py examples/test-flexmarks
+; which checks every "; expect:" marker below, or interactively with
 ;   echo "import examples/test-flexmarks" | ./bllsh
 ; (piping the file itself into the repl re-runs commands on blank lines)
 
@@ -113,23 +115,30 @@ def SIBLING 0xc9a41771a7568d2540bf660e0f9eb19bdedb7a1d30b2bf20f1e62970957225b5
 def SIG1 0x36f1ce2b4526a8265b4c06653c635fa001961ea3cab56bf37e822348e991f62f13047668d694439e882cde5573da9c8f3076b9f4c105b648fb316e84ec441cc7
 def SIG2 0x1231242a0ab61a37b05ee4c530b97d417ccfdeabc1f7b1e882b24c83eea634cda4ff914070e26362adaf2063fa4fdfde20417f8afd086c0f9f2e3f0916fb8fa4
 
-; member 1's withdrawal, all four checks pass, expect 1
+; member 1's withdrawal, all four checks pass
 eval (FLEXMARK 0 (EM1) (SIBLING) (SIG1) 0 0)
+; expect: 1
 
-; member 2's signature does not satisfy member 1's earmark, expect an error
+; member 2's signature does not satisfy member 1's earmark
 eval (FLEXMARK 0 (EM1) (SIBLING) (SIG2) 0 0)
+; expect: ERR(bip340_verify: invalid, non-empty signature)
 
 ; member 2's earmark is not at member 1's position in the tree, so the
-; overview check fails even with member 2's valid signature, expect an error
+; overview check fails even with member 2's valid signature, and the
+; flexmark refuses with its bare exception
 eval (FLEXMARK 0 (EM2) (SIBLING) (SIG2) 0 0)
+; expect: ERR(Exception: )
 
 ; member 2's earmark with its correct path resolves to the committed
 ; root, but this transaction only extracts for member 1, so the value
-; and new output checks both refuse it, expect an error
+; and new output checks both refuse it, and the eager all surfaces the
+; taproot mismatch error
 eval (FLEXMARK 0 (EM2) (EMLEAF (EM1)) (SIG2) 0 0)
+; expect: ERR(secp256k1_muladd: did not sum to inf; 0362709830ebbfc7344ccfc4a43e2d47a21594246d9dbf38d0e9d4eb6d630d4530)
 
-; the member payout is not the recreated pool output, expect an error
+; the member payout is not the recreated pool output
 eval (FLEXMARK 0 (EM1) (SIBLING) (SIG1) 1 0)
+; expect: ERR(secp256k1_muladd: did not sum to inf; 02086fc6f71cbd89943777f39b6da76cc2e2245d85914eac0d5a43839053d8437d)
 
 ; -------------------------------------------------------------------
 ; check isolation
@@ -140,12 +149,14 @@ eval (FLEXMARK 0 (EM1) (SIBLING) (SIG1) 1 0)
 ; above on the individual checks.
 
 ; member 2's earmark at member 1's position does not resolve to the
-; committed root, expect nil
+; committed root
 eval (CHECKOVEM 0 (EM2) (SIBLING))
+; expect: nil
 
 ; the pool output keeps 70000 of 100000, not enough for a 20000 sat
-; extraction, expect nil
+; extraction
 eval (CHECKVALUE 0 (EM2) (SIG2) 0)
+; expect: nil
 
 ; -------------------------------------------------------------------
 ; generation two
@@ -165,12 +176,14 @@ utxos 70110100000000002251204587257b2ced9abd802a8a8f303f7a710deefbfdb53acb581700
 def SIBLING2 0xd1bb89e6f26132c794783251784893c042c068a77c05c75b75a239bb7212e512
 def SIG2B 0x30607b5b7158fd6a2014060bf1d4f67821298cfef97ad4eaadfc36e6ca0b58a00c682642a102ded8ba176d2a9d0c0644cc5272a08e4f515a92f8378aca33ad0b
 
-; member 2's withdrawal from the second generation coin, expect 1
+; member 2's withdrawal from the second generation coin
 eval (FLEXMARK 0 (EM2) (SIBLING2) (SIG2B) 0 1)
+; expect: 1
 
 ; member 1's spent earmark no longer resolves to the committed root of
-; the second generation tree, expect nil
+; the second generation tree
 eval (CHECKOVEM 0 (EM1) (SIBLING2))
+; expect: nil
 
 ; -------------------------------------------------------------------
 ; compilation check
@@ -184,7 +197,7 @@ eval (CHECKOVEM 0 (EM1) (SIBLING2))
 
 program FLEXMARK
 
-; the compiled program accepts member 2's generation two withdrawal,
-; expect 1
+; the compiled program accepts member 2's generation two withdrawal
 blleval @FLEXMARK (((0 . (0x421f5fc9a21065445c96fdb91c0c1e2f2431741c72713b4b99ddcb316f31e9fc . 20000)) . (0xd1bb89e6f26132c794783251784893c042c068a77c05c75b75a239bb7212e512 . 0x30607b5b7158fd6a2014060bf1d4f67821298cfef97ad4eaadfc36e6ca0b58a00c682642a102ded8ba176d2a9d0c0644cc5272a08e4f515a92f8378aca33ad0b)) . (0 . 1))
+; expect: 1
 

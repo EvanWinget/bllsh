@@ -28,6 +28,8 @@
 ;   python3 examples/gen-test-context.py htlc
 ;
 ; Run with
+;   python3 examples/run-examples.py examples/test-flexmarks-htlc
+; which checks every "; expect:" marker below, or interactively with
 ;   echo "import examples/test-flexmarks-htlc" | ./bllsh
 ; (piping the file itself into the repl re-runs commands on blank lines)
 
@@ -123,15 +125,20 @@ utxos a086010000000000225120bcdfea0d67a01eab449319533b2b8159f5afd6c759548bb399b8
 
 def SIGCLAIM 0x956ea0e69edd04bf01be163a50292baf6ba26c582fe35a6b336d24bd0cb9b9a9299a5770f3ddb1080192a1962feb4df0ba6f74e7c0df0412f89a21081c5f9252
 
-; the claim passes all checks, expect 1
+; the claim passes all checks
 eval (FLEXMARK 0 (EM) 0 (HTLCPARAMS 1 (PREIMAGE) (SIGCLAIM)) 0 1)
+; expect: 1
 
-; a wrong preimage does not satisfy the earmark, expect an error
+; a wrong preimage does not satisfy the earmark, the flexmark refuses
+; with its bare exception
 eval (FLEXMARK 0 (EM) 0 (HTLCPARAMS 1 (h (EM)) (SIGCLAIM)) 0 1)
+; expect: ERR(Exception: )
 
 ; the refund branch refuses before the timeout, and the recipient's
-; signature is not the sender's anyway, expect an error
+; signature is not the sender's anyway, so the eager all surfaces the
+; signature error
 eval (FLEXMARK 0 (EM) 0 (HTLCPARAMS 0 0 (SIGCLAIM)) 0 1)
+; expect: ERR(bip340_verify: invalid, non-empty signature)
 
 ; sender refunds after the timeout, nLockTime 505
 tx 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000feffffff02187301000000000022512076dc7c28c70df1bf001f55d420c077b427c90d79089cb49e610c6eb014edd786a00f0000000000002251201697ffa6fd9de627c077e3d2fe541084ce13300b0bec1146f95ae57f0d0bd6a50217626c6c3a20666c65786d61726b2068746c632064656d6f41c06a245bf6dc698504c89a20cfded60853152b695336c28063b61c65cbd269e6b45da91da879ec10a96365e795b1bf1202bc17a09fab848c0b032bec0226047467f9010000
@@ -141,8 +148,9 @@ utxos a086010000000000225120bcdfea0d67a01eab449319533b2b8159f5afd6c759548bb399b8
 
 def SIGREFUND 0x0140af78929747343d8e64a0d266d7cd3a099fa76791a233c884a7b73a0188bad12829899f24d2e64a4276a48ed46d492177f4441b438cb9722f095dbc111618
 
-; the refund passes once nLockTime reaches the timeout, expect 1
+; the refund passes once nLockTime reaches the timeout
 eval (FLEXMARK 0 (EM) 0 (HTLCPARAMS 0 0 (SIGREFUND)) 0 1)
+; expect: 1
 
 ; sender tries to refund before the timeout, nLockTime 490
 tx 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000feffffff02187301000000000022512076dc7c28c70df1bf001f55d420c077b427c90d79089cb49e610c6eb014edd786a00f0000000000002251201697ffa6fd9de627c077e3d2fe541084ce13300b0bec1146f95ae57f0d0bd6a50217626c6c3a20666c65786d61726b2068746c632064656d6f41c06a245bf6dc698504c89a20cfded60853152b695336c28063b61c65cbd269e6b45da91da879ec10a96365e795b1bf1202bc17a09fab848c0b032bec0226047467ea010000
@@ -152,11 +160,13 @@ utxos a086010000000000225120bcdfea0d67a01eab449319533b2b8159f5afd6c759548bb399b8
 
 def SIGEARLY 0xba1b67dd7e8d192791d05d10772240a200d54d57f09cee88ae463af79a1ca99e80f433620e0564a1b0e0e5eab3027124319b259de7348460ceaa77576ab30942
 
-; the timeout has not been reached, expect an error
+; the timeout has not been reached
 eval (FLEXMARK 0 (EM) 0 (HTLCPARAMS 0 0 (SIGEARLY)) 0 1)
+; expect: ERR(Exception: )
 
-; the timelock check alone refuses nLockTime 490, expect nil
+; the timelock check alone refuses nLockTime 490
 eval (CLTVOK 500)
+; expect: nil
 
 ; recipient claims after the timeout has passed, nLockTime 505
 tx 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000feffffff02187301000000000022512076dc7c28c70df1bf001f55d420c077b427c90d79089cb49e610c6eb014edd786a00f000000000000225120d30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e650217626c6c3a20666c65786d61726b2068746c632064656d6f41c06a245bf6dc698504c89a20cfded60853152b695336c28063b61c65cbd269e6b45da91da879ec10a96365e795b1bf1202bc17a09fab848c0b032bec0226047467f9010000
@@ -167,13 +177,15 @@ utxos a086010000000000225120bcdfea0d67a01eab449319533b2b8159f5afd6c759548bb399b8
 def SIGCLAIMLATE 0x473e3fd8eb4ddda9228e15801c2f330cd05f4edd81774942f947b7d977b5748fb2703f74138df7f30ce39377d72b98bbf52b3a82ee1d1850edd9ba54c98447b1
 
 ; the claim branch does not expire, the preimage still wins after the
-; timeout, expect 1
+; timeout
 eval (FLEXMARK 0 (EM) 0 (HTLCPARAMS 1 (PREIMAGE) (SIGCLAIMLATE)) 0 1)
+; expect: 1
 
 ; the same spend through the compiled program instead of the symbll
 ; interpreter, the environment is the compiler's balanced argument
-; tree (((OV . EM) . (EMPATH . PARAMS)) . (OUTIDX . SPKODD)), expect 1
+; tree (((OV . EM) . (EMPATH . PARAMS)) . (OUTIDX . SPKODD))
 blleval @FLEXMARK (((0 . (0x479879c766ce108943ecf6bbba394ffd103cbed814074c9771e65645520fb46a 5000 0xd30199d74fb5a22d47b6e054e2f378cedacffcb89904a61d75d0dbd407143e65 0x1697ffa6fd9de627c077e3d2fe541084ce13300b0bec1146f95ae57f0d0bd6a5 500)) . (0 . (1 0x68746c632064656d6f20707265696d6167652c203332206279746573206f6b21 . 0x473e3fd8eb4ddda9228e15801c2f330cd05f4edd81774942f947b7d977b5748fb2703f74138df7f30ce39377d72b98bbf52b3a82ee1d1850edd9ba54c98447b1))) . (0 . 1))
+; expect: 1
 
 ; sender tries a time typed nLockTime against the height timeout
 tx 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000feffffff02187301000000000022512076dc7c28c70df1bf001f55d420c077b427c90d79089cb49e610c6eb014edd786a00f0000000000002251201697ffa6fd9de627c077e3d2fe541084ce13300b0bec1146f95ae57f0d0bd6a50217626c6c3a20666c65786d61726b2068746c632064656d6f41c06a245bf6dc698504c89a20cfded60853152b695336c28063b61c65cbd269e6b45da91da879ec10a96365e795b1bf1202bc17a09fab848c0b032bec022604746700f15365
@@ -186,11 +198,13 @@ def SIGTIMETYPED 0xd12e3988345e99e7430f9bc769e5295065d74de9e0ffd7d6c70220940beae
 ; nLockTime 1700000000 is a unix time, it satisfies a bare numeric
 ; comparison against the height timeout but not the type check, and
 ; the sender's signature is valid, so the type check is the only thing
-; refusing this spend, expect an error
+; refusing this spend
 eval (FLEXMARK 0 (EM) 0 (HTLCPARAMS 0 0 (SIGTIMETYPED)) 0 1)
+; expect: ERR(Exception: )
 
-; the timelock check alone refuses the time typed nLockTime, expect nil
+; the timelock check alone refuses the time typed nLockTime
 eval (CLTVOK 500)
+; expect: nil
 
 ; -------------------------------------------------------------------
 ; compilation check
