@@ -128,11 +128,12 @@ def run_file(path, repl_cls):
 
 def main(argv):
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # resolve file arguments against the caller's directory before the
+    # chdir below moves the process to the repository root
+    files = [os.path.abspath(f) for f in argv[1:]] if len(argv) > 1 else CORPUS
     sys.path.insert(0, root)
     os.chdir(root)
     repl_cls = load_repl_class(root)
-
-    files = argv[1:] if len(argv) > 1 else CORPUS
     exit_code = 0
     for path in files:
         checks, failures = run_file(path, repl_cls)
