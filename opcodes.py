@@ -10,6 +10,7 @@ import verystable.core.messages
 import verystable.core.script
 import verystable.core.secp256k1
 
+import costs
 import ripemd160
 
 from element import Element, Atom, Cons, Error, SerDeser, int_to_bytes
@@ -133,6 +134,12 @@ class FixOpcode(Opcode):
     @classmethod
     def argument(cls, budget, int_state, state, arg):
         assert int_state is None
+        # The collection charge covers the accumulator's two conses
+        # and count atom plus their share of the finish-time unpack
+        # walk. Charged before the arity check: the too-many error
+        # is collection work too.
+        if not budget.charge(costs.FIX_COLLECT):
+            return (None, None)
         n, rest = cls.state_info(state)
         if n >= cls.max_args:
             return (Error("too many arguments"), None)
@@ -156,6 +163,8 @@ class op_x(FixOpcode):
     max_args = 10
     @classmethod
     def operation(cls, budget, *args):
+        if not budget.charge(costs.CONTROL_BASE):
+            return None
         return Error(f"Exception: {" ".join(str(a) for a in args)}")
 
 class op_add(BinOpcode):
@@ -219,12 +228,18 @@ class op_lt_num(BinOpcode):
 
     @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.COMPARE_ARG):
+            return None
         if left.is_nil():
             # failed already
             return left.bumpref()
         if not right.is_atom():
             return Atom(0)
         if left.is_cons():
+            # Both operands are decoded in full before comparing.
+            work = costs.LT_NUM_PER_BYTE * (left.val2.val1 + right.val1)
+            if not budget.charge(work):
+                return None
             if left.val2.as_int() >= right.as_int():
                 return Atom(0)
         return Cons(Atom(1), right.bumpref())
@@ -242,6 +257,8 @@ class op_i(FixOpcode):
 
     @classmethod
     def operation(cls, budget, c, t=None, e=None):
+        if not budget.charge(costs.CONTROL_BASE):
+            return None
         if c.is_nil():
             return e.bumpref() if e is not None else c.bumpref()
         else:
@@ -314,6 +331,8 @@ class op_hash256(op_sha256):
 class op_rc(BinOpcode):
     @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.RC_ARG):
+            return None
         if left.is_cons():
             return Cons(left.val1.bumpref(), Cons(right.bumpref(), left.val2.bumpref()))
         else:
@@ -329,6 +348,11 @@ class op_rc(BinOpcode):
 class op_b(BinOpcode):
     @classmethod
     def binop(cls, budget, left, right):
+        # One charge per argument covers the amortized carry merges
+        # of the binary counter and the finish conses: each pending
+        # subtree consed at finish was pushed by exactly one fold.
+        if not budget.charge(costs.B_ARG):
+            return None
         if left.is_nil():
             return Cons(Cons(right.bumpref(), Atom(0)), Atom(1))
         else:
@@ -363,6 +387,8 @@ class op_h(FixOpcode):
 
     @classmethod
     def operation(cls, budget, lst):
+        if not budget.charge(costs.CONTROL_BASE):
+            return None
         if not lst.is_cons():
             return Error("not a list")
         return lst.val1.bumpref()
@@ -372,6 +398,8 @@ class op_t(FixOpcode):
 
     @classmethod
     def operation(cls, budget, lst):
+        if not budget.charge(costs.CONTROL_BASE):
+            return None
         if not lst.is_cons():
             return Error("not a list")
         return lst.val2.bumpref()
@@ -381,12 +409,16 @@ class op_l(FixOpcode):
 
     @classmethod
     def operation(cls, budget, lst):
+        if not budget.charge(costs.CONTROL_BASE):
+            return None
         return Atom(1 if lst.is_cons() else 0)
 
 class op_nand(BinOpcode):
     # aka is any false?
     @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.LOGIC_ARG):
+            return None
         if right.is_nil():
             return Atom(1)
         else:
@@ -401,6 +433,8 @@ class op_and(BinOpcode):
 
     @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.LOGIC_ARG):
+            return None
         if right.is_nil():
             return Atom(0)
         else:
@@ -411,6 +445,8 @@ class op_or(BinOpcode):
 
     @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.LOGIC_ARG):
+            return None
         if not right.is_nil():
             return Atom(1)
         else:
@@ -503,6 +539,8 @@ class op_eq(BinOpcode):
 
     @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.COMPARE_ARG):
+            return None
         if left.is_nil():
             # failed already
             return left.bumpref()
@@ -514,6 +552,10 @@ class op_eq(BinOpcode):
             return Cons(right.bumpref(), left.bumpref())
         else:
             assert left.is_cons() and left.val1.is_atom()
+            # The scan is charged on the argument's width whether or
+            # not the widths match, one rule instead of two.
+            if not budget.charge(costs.COMPARE_PER_BYTE * right.val1):
+                return None
             if left.val1.val1 != right.val1 or left.val1.val2 != right.val2:
                 return Atom(0)
             else:
@@ -533,6 +575,8 @@ class op_bigeq(BinOpcode):
 
     @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.COMPARE_ARG):
+            return None
         if left.is_nil():
             # failed already
             return left.bumpref()
@@ -540,11 +584,22 @@ class op_bigeq(BinOpcode):
             # first arg, nothing to be equal to
             return Cons(right.bumpref(), left.bumpref())
         else:
+            # Charged per node pair inside the walk with early exit:
+            # the walk follows structure, not memory, so a small
+            # shared tree can visit exponentially many pairs. The
+            # byte scan is charged for equal-width atom pairs only,
+            # after the free width comparison.
             chk = [(left.val1, right)]
             while chk:
+                if not budget.charge(costs.BIGEQ_PER_NODE):
+                    return None
                 a, b = chk.pop()
                 if a.is_atom():
-                    if not b.is_atom() or a.val1 != b.val1 or a.val2 != b.val2:
+                    if not b.is_atom() or a.val1 != b.val1:
+                        return Atom(0)
+                    if not budget.charge(costs.COMPARE_PER_BYTE * a.val1):
+                        return None
+                    if a.val2 != b.val2:
                         return Atom(0)
                 elif b.is_atom():
                     return Atom(0)
@@ -564,6 +619,8 @@ class op_bigeq(BinOpcode):
 class op_strlen(BinOpcode):
     @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.STRLEN_ARG):
+            return None
         if not right.is_atom():
             return Error(f"strlen: not an atom {right}")
         return Atom(left.as_int() + len(right.val2))
@@ -614,12 +671,18 @@ class op_lt_str(BinOpcode):
 
     @classmethod
     def binop(cls, budget, left, right):
+        if not budget.charge(costs.COMPARE_ARG):
+            return None
         if left.is_nil():
             # failed already
             return left.bumpref()
         if not right.is_atom():
             return Atom(0)
         if left.is_cons():
+            # The lexicographic scan stops at the shorter operand,
+            # the argument's width is the deterministic upper bound.
+            if not budget.charge(costs.COMPARE_PER_BYTE * right.val1):
+                return None
             if left.val2.val2 >= right.val2:
                 return Atom(0)
         return Cons(Atom(1), right.bumpref())
