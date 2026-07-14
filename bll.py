@@ -8,7 +8,7 @@ import functools
 from dataclasses import dataclass, field
 from typing import Type, List, Optional, Any
 
-from costs import Budget, DEFAULT_BUDGET
+from costs import Budget, DEFAULT_BUDGET, STEP, ENV_EDGE, atom_scan
 from element import Element, SExpr, Atom, Cons, Error, Func, FuncClass
 from opcodes import SExpr_FUNCS, Op_FUNCS, Opcode
 from workitem import fn_fin, fn_quote, fn_op, fn_partial
@@ -24,6 +24,12 @@ SpecialBLLOps = {
 
 def ResolveOpcode(op : Element, budget : Budget) -> Optional[Func]:
     if not isinstance(op, Atom):
+        return None
+    # The operator decode skips non-minimal zero bytes, so a wide
+    # operator atom charges its scan before it is read. A None return
+    # with the budget exhausted means this charge failed, not that
+    # the opcode is unknown.
+    if not budget.charge(atom_scan(op.val1)):
         return None
     opnum = op.as_int()
     if opnum == 0:
@@ -49,10 +55,16 @@ def OpAtom(opcode : str) -> Optional[Atom]:
 
 ####
 
-def ResolveEnv(baseenv : Element, idx : int, budget : Budget) -> Element:
+def ResolveEnv(baseenv : Element, idx : int, budget : Budget) -> Optional[Element]:
     idxstart = idx
     env = baseenv
     while idx > 1:
+        # Each tree edge is charged before it is checked, so an
+        # invalid reference pays for the edge that discovered it. A
+        # None return means the budget exhausted mid-walk.
+        if not budget.charge(ENV_EDGE):
+            env.deref()
+            return None
         if not isinstance(env, Cons):
             env.deref()
             return Error(f"invalid env reference {idxstart} : {baseenv}")
@@ -111,10 +123,19 @@ class fn_blleval(FuncClass):
             env.deref()
             workitem.fin_value(args)
         elif isinstance(args, Atom):
+            # The positive-integer test and the environment walk both
+            # read the whole atom, so a wide atom program charges its
+            # scan first.
+            if not workitem.budget.charge(atom_scan(args.val1)):
+                Element.deref_all(args, env)
+                return
             v = args.as_int()
             if v >= 1:
                 envarg = ResolveEnv(env, v, workitem.budget)
                 args.deref()
+                if envarg is None:
+                    # budget exhausted mid-walk
+                    return
             else:
                 envarg = args
                 env.deref()
@@ -124,7 +145,8 @@ class fn_blleval(FuncClass):
             opfunc = ResolveOpcode(op, workitem.budget)
             if opfunc is None:
                 Element.deref_all(args, env)
-                workitem.error(f"invalid opcode {op}")
+                if not workitem.budget.exhausted:
+                    workitem.error(f"invalid opcode {op}")
             else:
                 workitem.new_continuation(opfunc, args, env)
             op.deref()
@@ -237,22 +259,36 @@ class WorkItem:
         self.fin_value(Error(msg))
 
     def step(self) -> None:
+        # One STEP per continuation pop, charged before the pop. A
+        # failed charge leaves the frame in place for unwind.
+        if not self.budget.charge(STEP):
+            return
         c = self.continuations.pop()
         fnobj, state = c.fn.steal_func()
         fnobj.step(state, c.args, c.env, self)
 
     def feedback(self, value : Element) -> None:
+        # An error discards the whole stack first, uncharged: every
+        # discarded frame was paid for by the charge that popped or
+        # pushed it. The final delivery to an empty stack is also
+        # uncharged, only the pop that hands the value to a receiver
+        # pays STEP.
         if isinstance(value, Error):
             for c in self.continuations:
                 c.deref()
             self.continuations = []
 
-        if self.continuations:
-            c = self.continuations.pop()
-            fnobj, state = c.fn.steal_func()
-            fnobj.feedback(state, value, c.args, c.env, self)
-        else:
+        if not self.continuations:
             self.fin_value(value)
+            return
+
+        if not self.budget.charge(STEP):
+            value.deref()
+            return
+
+        c = self.continuations.pop()
+        fnobj, state = c.fn.steal_func()
+        fnobj.feedback(state, value, c.args, c.env, self)
 
     def finished(self) -> bool:
         return len(self.continuations) == 1 and self.continuations[0].fn.val1[0] == fn_fin

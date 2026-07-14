@@ -253,6 +253,9 @@ class IntStateOpcode(Opcode):
     def argument(cls, budget, int_state, state, arg):
         assert state.is_nil()
         next_state = cls.update_state(budget, int_state, arg)
+        if next_state is None:
+            # a charge failed and latched the budget
+            return (None, None)
         if isinstance(next_state, Element):
             assert next_state.is_error()
             return (next_state, None)
