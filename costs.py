@@ -2,7 +2,7 @@
 
 The constants and charging semantics mirror libbll's cost model
 (libbll/src/cost.h in the bll-consensus repository, adopted at its
-commit 15c1a16). The values are calibrated there, one cost unit per
+commit 34573a0). The values are calibrated there, one cost unit per
 nanosecond of measured evaluation time on libbll's pinned calibration
 machine, and adopted here verbatim so differential vectors can pin
 exact charged totals across both implementations. They are proposals
@@ -143,9 +143,9 @@ WR_PER_BYTE = 1
 # Softfork guard machinery: the flat cost of entering and leaving a
 # recognized softfork guard (allowance push, exit frame, exactness
 # check, pop and nil delivery), charged against the guard's declared
-# allowance at entry. Provisional value pending libbll calibration,
-# adopted verbatim once the bench family lands.
-GUARD = 64
+# allowance at entry so both validator classes charge exactly the
+# declared cost.
+GUARD = 56
 
 # The budget bought by one evaluation's witness bytes, the BIP342
 # tapscript analog in nanosecond units: one signature check per 50
