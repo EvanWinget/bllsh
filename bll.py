@@ -274,9 +274,7 @@ class WorkItem:
         # uncharged, only the pop that hands the value to a receiver
         # pays STEP.
         if isinstance(value, Error):
-            for c in self.continuations:
-                c.deref()
-            self.continuations = []
+            self.unwind()
 
         if not self.continuations:
             self.fin_value(value)

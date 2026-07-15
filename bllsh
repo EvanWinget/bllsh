@@ -205,12 +205,26 @@ class BTCLispRepl(cmd.Cmd):
         self.wi = symbll.WorkItem.begin(sexpr, self.symbols)
         self.show_state()
 
+    def check_exhausted(self):
+        """Reports and discards a work item whose budget latched, the
+        interactive analog of eval()'s exhaustion error. A latched
+        step makes no progress, so the stepping loops must not keep
+        going."""
+        if self.wi is None or not self.wi.budget.exhausted:
+            return False
+        print("budget exhausted")
+        self.wi.unwind()
+        self.wi = None
+        return True
+
     @handle_exc
     def do_step(self, arg):
         if self.wi is None:
             print("No expression being debugged")
         elif not self.wi.finished():
             self.wi.step()
+            if self.check_exhausted():
+                return
             self.show_state()
         else:
             r = self.wi.get_result()
@@ -224,10 +238,12 @@ class BTCLispRepl(cmd.Cmd):
             print("No expression being debugged")
 
         target = len(self.wi.continuations)
-        while not self.wi.finished():
+        while not self.wi.finished() and not self.wi.budget.exhausted:
             self.wi.step()
             if len(self.wi.continuations) <= target:
                 break
+        if self.check_exhausted():
+            return
         if not self.wi.finished():
             self.show_state()
         else:
@@ -242,8 +258,10 @@ class BTCLispRepl(cmd.Cmd):
             print("No expression being debugged")
             return
 
-        while not self.wi.finished():
+        while not self.wi.finished() and not self.wi.budget.exhausted:
             self.wi.step()
+        if self.check_exhausted():
+            return
 
         r = self.wi.get_result()
         print(f"Result: {r}")
@@ -256,10 +274,12 @@ class BTCLispRepl(cmd.Cmd):
             print("No expression being debugged")
             return
 
-        while not self.wi.finished():
+        while not self.wi.finished() and not self.wi.budget.exhausted:
             self.wi.step()
             self.show_state()
             print("")
+        if self.check_exhausted():
+            return
 
         r = self.wi.get_result()
         print(f"Result: {r}")

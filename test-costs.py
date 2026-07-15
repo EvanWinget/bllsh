@@ -296,6 +296,21 @@ def error_vs_exhaustion():
 case("charge-precedes-work", error_vs_exhaustion)
 
 
+# a single pathological demand can latch even the default budget (a
+# shift output size bound prices past it before any allocation), and
+# the symbolic evaluator must abort cleanly rather than stepping an
+# emptied stack
+def symbll_exhaustion_aborts():
+    import symbll
+    r = symbll.symbolic_eval(SExpr.parse("(shift 1 36893488147419103232)"),
+                             symbll.SymbolTable())
+    ok = isinstance(r, Error) and "budget exhausted" in str(r)
+    shown = str(r)[:60]
+    r.deref()
+    return ok, shown
+case("symbll-exhaustion-aborts", symbll_exhaustion_aborts)
+
+
 # charged runs leave the allocator balanced even when exhaustion
 # unwinds mid-evaluation
 def no_leak_on_exhaustion():

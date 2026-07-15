@@ -504,11 +504,13 @@ class SerDeser:
                 return Error("atom too large to serialize")
             # Emitted size: one byte for nil and the sub-0x80
             # singles, otherwise the payload plus its size prefix,
-            # charged before anything is built.
+            # charged before the output is assembled. The prefix
+            # width comes from sizebytes so the charge can never
+            # drift from the bytes actually emitted below.
             if n == 0 or (n == 1 and e.val2[0] < 128):
                 emitted = 1
             else:
-                emitted = n + (1 if n <= 0x3F else 2 if n <= 0x1FFF else 3)
+                emitted = n + len(self.sizebytes(n))
             self.charge(self.per_element + self.per_byte * emitted)
             self.emitted += emitted
             if max_size is not None and self.emitted > max_size:

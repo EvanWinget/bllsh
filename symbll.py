@@ -453,6 +453,13 @@ class WorkItem:
         c = self.continuations.pop()
         fnobj, state = c.fn.steal_func()
         fnobj.step(state, c.args, c.localsyms, self)
+        if self.budget.exhausted and (not self.continuations
+                or self.continuations[-1].fn.val1[0] != fn_fin):
+            # A latched budget makes the shared opcode machinery drop
+            # its work without delivering a value, so the driver loop
+            # would otherwise pop an emptied stack. Abort like the
+            # cost overrun below.
+            self.error("budget exhausted, aborting")
         self.costleft -= 1
         if self.costleft <= 0 and self.continuations[-1].fn.val1[0] != fn_fin:
             self.error("cost overrun, aborting")
@@ -474,6 +481,11 @@ class WorkItem:
 
     def finished(self) -> bool:
         return len(self.continuations) == 1 and self.continuations[0].fn.val1[0] == fn_fin
+
+    def unwind(self) -> None:
+        for c in self.continuations:
+            c.deref()
+        self.continuations = []
 
     def get_result(self) -> Element:
         assert self.finished()

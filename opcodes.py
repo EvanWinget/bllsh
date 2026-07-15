@@ -368,10 +368,15 @@ class op_sha256(IntStateOpcode):
     def final_state(cls, budget, int_state):
         # One charge covers finalization, including the double-hash
         # opcodes' second compression pass, plus the digest atom's
-        # allocation.
+        # allocation, spent here once so every hash opcode only
+        # overrides the digest hook.
         if not budget.charge(costs.HASH_BASE + costs.MALLOC_PER_BYTE * cls.digest_size):
             return None
-        return Atom(int_state.digest())
+        return Atom(cls.digest(int_state))
+
+    @classmethod
+    def digest(cls, int_state):
+        return int_state.digest()
 
 class op_ripemd160(op_sha256):
     digest_size = 20
@@ -384,23 +389,19 @@ class op_hash160(op_sha256):
     digest_size = 20
 
     @classmethod
-    def final_state(cls, budget, int_state):
-        if not budget.charge(costs.HASH_BASE + costs.MALLOC_PER_BYTE * cls.digest_size):
-            return None
+    def digest(cls, int_state):
         x = ripemd160.hasher()
         x.update(int_state.digest())
-        return Atom(x.digest())
+        return x.digest()
 
 class op_hash256(op_sha256):
     digest_size = 32
 
     @classmethod
-    def final_state(cls, budget, int_state):
-        if not budget.charge(costs.HASH_BASE + costs.MALLOC_PER_BYTE * cls.digest_size):
-            return None
+    def digest(cls, int_state):
         x = hashlib.sha256()
         x.update(int_state.digest())
-        return Atom(x.digest())
+        return x.digest()
 
 class op_rc(BinOpcode):
     @classmethod

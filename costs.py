@@ -149,9 +149,11 @@ assert BUDGET_PER_WITNESS_BYTE * 50 == SIG_VERIFY
 assert BUDGET_BASE == SIG_VERIFY
 
 # The default allowance when an evaluation is started without an
-# explicit budget. Large enough that interactive use never exhausts
-# it, small enough that used plus any single charge stays an exact
-# integer comparison against the limit.
+# explicit budget. Large enough that only a pathological single
+# demand exhausts it (a shift whose output size bound alone prices
+# past it, for example), so drivers must still handle exhaustion:
+# eval returns an error, the symbolic evaluator aborts, and the
+# debugger reports it.
 DEFAULT_BUDGET = 2**62
 
 
