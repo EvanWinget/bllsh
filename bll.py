@@ -8,9 +8,9 @@ import functools
 from dataclasses import dataclass, field
 from typing import Type, List, Optional, Any
 
-from costs import Budget, DEFAULT_BUDGET, STEP, ENV_EDGE, atom_scan
+from costs import Budget, DEFAULT_BUDGET, GUARD, STEP, ENV_EDGE, atom_scan
 from element import Element, SExpr, Atom, Cons, Error, Func, FuncClass
-from opcodes import SExpr_FUNCS, Op_FUNCS, Opcode
+from opcodes import SExpr_FUNCS, Op_FUNCS, Opcode, op_unknown, UNKNOWN_OP_RANGE
 from workitem import fn_fin, fn_quote, fn_op, fn_partial
 
 ####
@@ -18,9 +18,16 @@ from workitem import fn_fin, fn_quote, fn_op, fn_partial
 SpecialBLLOps = {
     'q': 0,
     'a': 1,
-#    'sf': 2,
+    'sf': 2,
     'partial': 3,
 }
+
+# The declared cost of a softfork guard must be a positive integer
+# no wider than a signed 64 bit machine word. Any budget the system
+# grants is far below this bound, so a wider declaration could never
+# be paid and rejecting it keeps the decode within the machine
+# integer fast path.
+SOFTFORK_COST_MAX = 2**63 - 1
 
 def ResolveOpcode(op : Element, budget : Budget) -> Optional[Func]:
     if not isinstance(op, Atom):
@@ -36,13 +43,20 @@ def ResolveOpcode(op : Element, budget : Budget) -> Optional[Func]:
         return Func(fn_quote, None, Atom(0))
     elif opnum == 1:
         return Func(fn_apply, None, Atom(0))
-    #elif opnum == 2:
-    #    return fn_softfork()
+    elif opnum == 2:
+        return Func(fn_softfork, None, Atom(0))
     elif opnum == 3:
         return Func(fn_partial, None, Atom(0))
     else:
         opcls = Op_FUNCS.get(opnum, None)
-        if opcls is None: return None
+        if opcls is None:
+            # Unassigned numbers inside the eligible range succeed as
+            # unknown operators. Negative numbers and numbers at or
+            # beyond UNKNOWN_OP_RANGE stay invalid opcodes.
+            if 0 <= opnum < UNKNOWN_OP_RANGE:
+                return Func(fn_op, (op_unknown, op_unknown.from_opnum(opnum)),
+                            op_unknown.initial_state())
+            return None
         return Func(fn_op, (opcls, opcls.initial_int_state()), opcls.initial_state())
 
 def OpAtom(opcode : str) -> Optional[Atom]:
@@ -145,7 +159,10 @@ class fn_blleval(FuncClass):
             opfunc = ResolveOpcode(op, workitem.budget)
             if opfunc is None:
                 Element.deref_all(args, env)
-                if not workitem.budget.exhausted:
+                # A None with either latch set means the scan charge
+                # failed, not that the opcode is unknown.
+                if (not workitem.budget.exhausted
+                        and not workitem.budget.guard_breach):
                     workitem.error(f"invalid opcode {op}")
             else:
                 workitem.new_continuation(opfunc, args, env)
@@ -208,6 +225,148 @@ class fn_apply():
 
         workitem.new_continuation(Func(cls, None, newst), args, env)
 
+@FuncClass.implements_API
+class fn_softfork(FuncClass):
+    # state structure: nil before the first finished value, then
+    # Cons( count, values ) where values holds the first four values
+    # newest first and count saturates at five, which is enough to
+    # tell the exactly-four shape from every other arity while
+    # keeping the state O(1) whatever the argument count.
+
+    @classmethod
+    def step(cls, state : Element, args : Element, env : Any, workitem : Any) -> None:
+        if args.is_nil():
+            args.deref()
+            cls.finish(state, env, workitem)
+        elif isinstance(args, Cons):
+            arg, rest = args.steal_children()
+            workitem.new_continuation(Func(cls, None, state), rest, env)
+            workitem.eval_arg(arg, env.bumpref())
+        else:
+            Element.deref_all(state, args, env)
+            workitem.error("argument to opcode is improper list")
+
+    @classmethod
+    def feedback(cls, state : Element, value : Element, args : Element, env : Any, workitem : Any) -> None:
+        assert not isinstance(value, Error)
+        if state.is_nil():
+            state.deref()
+            newst = Cons(Atom(1), Cons(value, Atom(0)))
+        else:
+            count_el, values = state.steal_children()
+            count = count_el.as_int()
+            count_el.deref()
+            if count < 4:
+                newst = Cons(Atom(count + 1), Cons(value, values))
+            else:
+                # Values beyond the fourth are evaluated and
+                # discarded: any arity other than four charges the
+                # declared cost and returns nil, so only the first
+                # four values and the saturated count matter.
+                value.deref()
+                newst = Cons(Atom(5), values)
+        workitem.new_continuation(Func(cls, None, newst), args, env)
+
+    @classmethod
+    def finish(cls, state : Element, env : Any, workitem : Any) -> None:
+        budget = workitem.budget
+        if state.is_nil():
+            Element.deref_all(state, env)
+            workitem.error("softfork requires positive cost")
+            return
+        count_el, values = state.steal_children()
+        count = count_el.as_int()
+        count_el.deref()
+        vals = []
+        while isinstance(values, Cons):
+            v, values = values.steal_children()
+            vals.append(v)
+        values.deref()
+        vals.reverse()
+
+        # The declared cost is hard validity: a wide atom charges its
+        # scan before the read, and anything but a positive integer
+        # within the machine word fails whatever the arity.
+        cost_el = vals[0]
+        declared = None
+        if isinstance(cost_el, Atom):
+            if not budget.charge(atom_scan(cost_el.val1)):
+                Element.deref_all(*vals)
+                env.deref()
+                return
+            v = cost_el.as_int()
+            if 1 <= v <= SOFTFORK_COST_MAX:
+                declared = v
+        if declared is None:
+            Element.deref_all(*vals)
+            env.deref()
+            workitem.error("softfork requires positive cost")
+            return
+
+        # The declared cost is charged as one lump whether or not a
+        # guard runs, so every validator prices this application
+        # identically however much of its form it understands.
+        if not budget.charge(declared):
+            Element.deref_all(*vals)
+            env.deref()
+            return
+
+        # Everything from here is lenient: an unrecognized shape or
+        # extension is the soft-fork hook and must stay valid, so it
+        # delivers nil rather than failing.
+        recognized = False
+        if count == 4:
+            ext = vals[1]
+            if isinstance(ext, Atom):
+                if not budget.charge(atom_scan(ext.val1)):
+                    Element.deref_all(*vals)
+                    env.deref()
+                    return
+                # Extension 0, the base operator table, is the only
+                # extension recognized at launch.
+                recognized = (ext.as_int() == 0)
+        if not recognized:
+            Element.deref_all(*vals)
+            env.deref()
+            workitem.fin_value(Atom(0))
+            return
+
+        program, guardenv = vals[2], vals[3]
+        Element.deref_all(cost_el, vals[1], env)
+        # The guarded program runs against an allowance of exactly
+        # the declared cost, with the guard machinery's own flat
+        # charge consumed out of it first.
+        budget.push_allowance(declared)
+        if not budget.charge(GUARD):
+            Element.deref_all(program, guardenv)
+            return
+        workitem.new_continuation(Func(fn_exitguard, None, Atom(0)), Atom(0), Atom(0))
+        workitem.eval_arg(program, guardenv)
+
+@FuncClass.implements_API
+class fn_exitguard(FuncClass):
+    """The pending frame of an executing softfork guard. It receives
+    the guarded program's value, discards it, and delivers nil if the
+    guard's allowance was consumed exactly. An error raised inside
+    the guard never reaches this frame, because the unwind discards
+    the whole stack and clears the allowance."""
+
+    @classmethod
+    def step(cls, state : Element, args : Element, env : Any, workitem : Any) -> None:
+        # The frame below a pending evaluation is only ever popped by
+        # value delivery.
+        Element.deref_all(state, args, env)
+        workitem.error("BUG? should be unreachable")
+
+    @classmethod
+    def feedback(cls, state : Element, value : Element, args : Element, env : Any, workitem : Any) -> None:
+        assert not isinstance(value, Error)
+        Element.deref_all(state, value, args, env)
+        if workitem.budget.pop_allowance():
+            workitem.fin_value(Atom(0))
+        else:
+            workitem.error("softfork specified cost mismatch")
+
 @dataclass
 class Continuation:
     fn: Func
@@ -234,9 +393,9 @@ class WorkItem:
         return wi
 
     def get_partial_func(self, value : Element) -> Optional[Element]:
-        # Only table opcodes can be partially applied: everything
-        # else is rejected through the common None path, which owns
-        # the single deref of value.
+        # Only table opcodes can be partially applied: the magic
+        # operators and unknown operators are rejected through the
+        # common None path, which owns the single deref of value.
         if isinstance(value, Atom):
             opnum = value.as_int()
             opcls = Op_FUNCS.get(opnum, None)
@@ -264,11 +423,18 @@ class WorkItem:
     def step(self) -> None:
         # One STEP per continuation pop, charged before the pop. A
         # failed charge leaves the frame in place for unwind.
-        if not self.budget.charge(STEP):
-            return
-        c = self.continuations.pop()
-        fnobj, state = c.fn.steal_func()
-        fnobj.step(state, c.args, c.env, self)
+        if self.budget.charge(STEP):
+            c = self.continuations.pop()
+            fnobj, state = c.fn.steal_func()
+            fnobj.step(state, c.args, c.env, self)
+        # A guard allowance breach anywhere inside the step means the
+        # guarded program overran its declared cost. The guard and
+        # all pending work are abandoned and the evaluation finishes
+        # with the mismatch error, so drivers never see the breach
+        # latch itself.
+        if self.budget.guard_breach:
+            self.unwind()
+            self.fin_value(Error("softfork specified cost mismatch"))
 
     def feedback(self, value : Element) -> None:
         # An error discards the whole stack first, uncharged: every
@@ -298,6 +464,8 @@ class WorkItem:
         for c in self.continuations:
             c.deref()
         self.continuations = []
+        # Abandoning pending work abandons any active guards with it.
+        self.budget.clear_allowances()
 
     def get_result(self) -> Element:
         assert self.finished()
