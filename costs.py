@@ -140,6 +140,13 @@ WR_BASE = 224
 WR_PER_ELEMENT = 4
 WR_PER_BYTE = 1
 
+# Softfork guard machinery: the flat cost of entering and leaving a
+# recognized softfork guard (allowance push, exit frame, exactness
+# check, pop and nil delivery), charged against the guard's declared
+# allowance at entry. Provisional value pending libbll calibration,
+# adopted verbatim once the bench family lands.
+GUARD = 64
+
 # The budget bought by one evaluation's witness bytes, the BIP342
 # tapscript analog in nanosecond units: one signature check per 50
 # witness bytes priced at the measured verification time.
@@ -163,23 +170,64 @@ class Budget:
     exhausted: that charge and every later one fail, including free
     ones. The failed charge sets used to the full limit, so an
     exhausted evaluation reports exactly the budget it was given,
-    which is what makes the boundary replay contract exact."""
+    which is what makes the boundary replay contract exact.
+
+    A softfork guard prepays its declared cost as one lump and then
+    routes every charge inside the guard to an allowance of exactly
+    that amount, so the outer counter never moves while a guard is
+    active. A charge that does not fit the innermost allowance sets
+    the sticky guard_breach flag instead of the exhausted latch: the
+    outer budget may have room, so breach is a program outcome (the
+    guarded program overran its declaration), not exhaustion. The
+    two latches are mutually exclusive because no charge can reach
+    the outer counter while an allowance is active, and no allowance
+    can exist unless its lump already fit."""
 
     def __init__(self, limit):
         self.limit = limit
         self.used = 0
         self.exhausted = False
+        self.allowances = []
+        self.guard_breach = False
 
     def charge(self, amount):
-        """Spends amount. Charged before the work it covers. False
-        once the budget is exhausted. A zero charge always fits until
-        the budget latches."""
-        if self.exhausted or amount > self.limit - self.used:
+        """Spends amount, against the innermost guard allowance if
+        one is active, else against the budget itself. Charged before
+        the work it covers. False once either latch is set. A zero
+        charge always fits until then."""
+        if self.exhausted or self.guard_breach:
+            return False
+        if self.allowances:
+            allowed, used = self.allowances[-1]
+            if amount > allowed - used:
+                self.guard_breach = True
+                return False
+            self.allowances[-1] = (allowed, used + amount)
+            return True
+        if amount > self.limit - self.used:
             self.exhausted = True
             self.used = self.limit
             return False
         self.used += amount
         return True
+
+    def push_allowance(self, allowed):
+        """Opens a guard allowance. Every charge until the matching
+        pop spends this allowance, whose lump the enclosing context
+        already paid."""
+        self.allowances.append((allowed, 0))
+
+    def pop_allowance(self):
+        """Closes the innermost guard allowance and reports whether
+        it was consumed exactly."""
+        allowed, used = self.allowances.pop()
+        return used == allowed
+
+    def clear_allowances(self):
+        """Discards all guard allowances and the breach latch, used
+        when an unwind abandons the guarded evaluation."""
+        self.allowances = []
+        self.guard_breach = False
 
 
 def budget_for_witness_size(witness_size):
