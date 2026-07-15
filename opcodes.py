@@ -84,6 +84,15 @@ class Opcode:
     def opcode_name(cls):
         return cls.__name__
 
+    @classmethod
+    def size_cap(cls):
+        """Overridable output size limit for the opcodes whose result
+        can outgrow their inputs, checked at a fixed point in each
+        one's charge sequence. The base opcodes are uncapped, a
+        capped variant only overrides the value so every charge
+        sequence lives here once."""
+        return None
+
     @staticmethod
     def initial_state():
         return Atom(0)
@@ -176,6 +185,9 @@ class op_add(BinOpcode):
             if not budget.charge(costs.ARITH_PER_BYTE * (left.val1 + right.val1)):
                 return None
             enc = int_to_bytes(left.as_int() + right.as_int())
+            cap = cls.size_cap()
+            if cap is not None and len(enc) > cap:
+                return Error("element size limit exceeded")
             if not budget.charge(costs.MALLOC_PER_BYTE * len(enc)):
                 return None
             return Atom(enc)
@@ -201,12 +213,15 @@ class op_sub(BinOpcode):
         if not budget.charge(costs.ARITH_PER_BYTE * (minuend.val1 + right.val1)):
             return None
         enc = int_to_bytes(minuend.as_int() - right.as_int())
+        cap = cls.size_cap()
+        if cap is not None and len(enc) > cap:
+            return Error("element size limit exceeded")
         if not budget.charge(costs.MALLOC_PER_BYTE * len(enc)):
             return None
         return Atom(enc)
 
-    @staticmethod
-    def finish(budget, intstate, state):
+    @classmethod
+    def finish(cls, budget, intstate, state):
         if state.is_cons():
             # The negation re-encodes the stored minuend: base, scan
             # and allocation charges like any other fold of this
@@ -215,6 +230,9 @@ class op_sub(BinOpcode):
             if not budget.charge(costs.ARITH_ARG + costs.ARITH_PER_BYTE * stored.val1):
                 return None
             enc = int_to_bytes(0 - stored.as_int())
+            cap = cls.size_cap()
+            if cap is not None and len(enc) > cap:
+                return Error("element size limit exceeded")
             if not budget.charge(costs.MALLOC_PER_BYTE * len(enc)):
                 return None
             return Atom(enc)
@@ -240,6 +258,9 @@ class op_mul(BinOpcode):
             if not budget.charge(work):
                 return None
             enc = int_to_bytes(left.as_int() * right.as_int())
+            cap = cls.size_cap()
+            if cap is not None and len(enc) > cap:
+                return Error("element size limit exceeded")
             if not budget.charge(costs.MALLOC_PER_BYTE * len(enc)):
                 return None
             return Atom(enc)
@@ -604,14 +625,6 @@ class op_shift(FixOpcode):
     min_args = max_args = 2
 
     @classmethod
-    def size_cap(cls):
-        # Overridable output size limit for left shifts, checked once
-        # the output size bound is known, before the byte charge. The
-        # base opcode is uncapped, a capped variant only overrides
-        # the value so the charge sequence lives here once.
-        return None
-
-    @classmethod
     def operation(cls, budget, inp, n):
         if not budget.charge(costs.SHIFT_BASE):
             return None
@@ -751,14 +764,6 @@ class op_strlen(BinOpcode):
 
 class op_cat(BinOpcode):
     @classmethod
-    def size_cap(cls):
-        # Overridable output size limit, checked between the shape
-        # check and the byte charge. The base opcode is uncapped, a
-        # capped variant only overrides the value so the charge
-        # sequence lives here once.
-        return None
-
-    @classmethod
     def binop(cls, budget, left, right):
         if not budget.charge(costs.CAT_ARG):
             return None
@@ -893,14 +898,6 @@ class op_list_read(FixOpcode):
 
 class op_list_write(FixOpcode):
     min_args = max_args = 1
-
-    @classmethod
-    def size_cap(cls):
-        # Overridable output size limit, applied inside the encoder
-        # at the same cumulative positions where libbll checks its
-        # element size limit. The base opcode is uncapped, a capped
-        # variant only overrides the value.
-        return None
 
     @classmethod
     def operation(cls, budget, el):
@@ -1157,6 +1154,9 @@ class op_tx(BinOpcode):
             return result
         else:
             assert isinstance(result, bytes), f"invalid tx result {result}"
+            cap = cls.size_cap()
+            if cap is not None and left.val1 + len(result) > cap:
+                return Error("element size limit exceeded")
             # The extended accumulator is a fresh atom: copy and
             # allocation are charged on its whole width before it is
             # built, which recopies the state every fold and so
