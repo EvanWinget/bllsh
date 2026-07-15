@@ -252,10 +252,7 @@ class op_mul(BinOpcode):
             # The schoolbook product runs one pass per limb of one
             # operand over the other: the divided byte product plus
             # a per-pass overhead linear in the wider operand.
-            work = (costs.ARITH_PER_BYTE * (left.val1 + right.val1)
-                    + costs.MULDIV_LIMB_PER_BYTE * max(left.val1, right.val1)
-                    + (left.val1 * right.val1) // costs.MUL_PRODUCT_DIV)
-            if not budget.charge(work):
+            if not budget.charge(costs.mul_fold_work(left.val1, right.val1)):
                 return None
             enc = int_to_bytes(left.as_int() * right.as_int())
             cap = cls.size_cap()
@@ -1320,12 +1317,10 @@ class op_unknown(IntStateOpcode):
         if selector == 2:
             # The mul shape prices each fold after the first like the
             # real op_mul fold over the widths a running product
-            # would reach, byte_total carrying the product width.
+            # would reach, byte_total carrying the product width,
+            # through the same shared work function op_mul charges.
             if count > 0:
-                work += (costs.ARITH_ARG
-                         + costs.ARITH_PER_BYTE * (byte_total + width)
-                         + costs.MULDIV_LIMB_PER_BYTE * max(byte_total, width)
-                         + (byte_total * width) // costs.MUL_PRODUCT_DIV)
+                work += costs.ARITH_ARG + costs.mul_fold_work(byte_total, width)
         return (selector, multiplier, count + 1, byte_total + width, work)
 
     @classmethod

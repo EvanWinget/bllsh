@@ -25,35 +25,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import costs
 from costs import Budget, DEFAULT_BUDGET, atom_scan
-from element import Atom, Error, Element, SExpr
-import bll
-
-results = []
-
-
-def case(name, fn):
-    try:
-        ok, shown = fn()
-        results.append((name, ok, shown))
-    except Exception as e:
-        results.append((name, False, f"raised {type(e).__name__}: {e}"))
-
-
-def run(src, limit=None):
-    se = SExpr.parse(src)
-    prog = bll.ToBLL(se)
-    se.deref()
-    budget = Budget(DEFAULT_BUDGET if limit is None else limit)
-    r = bll.eval(prog, Atom(0), budget)
-    return r, budget
-
-
-def mach(n):
-    """Machine cost of applying one operator to n quoted arguments:
-    one pop for the program, four pops per argument and one pop for
-    the finish step. The softfork collection uses the same frame
-    shape as the opcode fold."""
-    return costs.STEP * (2 + 4 * n)
+from element import Atom, Error, Element
+from testutil import case, mach, replay, report, run, total
 
 
 def standalone(src):
@@ -62,37 +35,6 @@ def standalone(src):
     assert not b.exhausted, src
     r.deref()
     return b.used
-
-
-def total(name, src, expected, want=None):
-    def fn():
-        r, b = run(src)
-        ok = b.used == expected and not b.exhausted
-        shown = f"used {b.used}, expected {expected}"
-        if want is not None:
-            ok = ok and want in str(r)
-            shown += f", result {str(r)[:40]}"
-        r.deref()
-        return ok, shown
-    case(name, fn)
-
-
-def replay(name, src):
-    def fn():
-        r0, b0 = run(src)
-        c = b0.used
-        r1, b1 = run(src, c)
-        r2, b2 = run(src, c - 1)
-        ok = (not b0.exhausted and not b1.exhausted
-              and b1.used == c and str(r1) == str(r0)
-              and isinstance(r1, Error) == isinstance(r0, Error)
-              and b2.exhausted and b2.used == c - 1)
-        shown = (f"C={c}, at C used {b1.used}, "
-                 f"at C-1 {'exhausted' if b2.exhausted else 'NOT exhausted'} "
-                 f"used {b2.used}")
-        Element.deref_all(r0, r1, r2)
-        return ok, shown
-    case(name, fn)
 
 
 # ---- Budget allowance mechanics ----
@@ -240,6 +182,19 @@ D_X = costs.GUARD + 2 * costs.STEP + costs.CONTROL_BASE
 total("sf/guard-error-inside",
       f"(sf (q . {D_X + 100}) (q . 0) (q x) (q . 0))",
       mach(4) + D_X + 100, want="Exception")
+
+# the error-versus-mismatch precedence boundary: an error escapes the
+# guard only if every charge up to and including its delivery pop
+# fits the allowance. (x) consumes GUARD plus two pops plus its
+# finish charge, and the error's FIN delivery pop is one more STEP:
+# with exactly that much declared the error wins, one STEP less and
+# the delivery pop breaches, converting the failure to the mismatch
+total("sf/guard-error-delivery-fits-exactly",
+      f"(sf (q . {D_X + costs.STEP}) (q . 0) (q x) (q . 0))",
+      mach(4) + D_X + costs.STEP, want="Exception")
+total("sf/guard-error-delivery-breaches",
+      f"(sf (q . {D_X}) (q . 0) (q x) (q . 0))",
+      mach(4) + D_X, want="softfork specified cost mismatch")
 total("sf/guard-invalid-opcode-inside",
       f"(sf (q . {costs.GUARD + 2 * costs.STEP + 50}) (q . 0) (q -1) (q . 0))",
       mach(4) + costs.GUARD + 2 * costs.STEP + 50, want="invalid opcode")
@@ -283,6 +238,10 @@ replay("replay/guard-over-declared",
        f"(sf (q . {D_QUOTE + 1}) (q . 0) (q q . 7) (q . 0))")
 replay("replay/guard-error-inside",
        f"(sf (q . {D_X + 100}) (q . 0) (q x) (q . 0))")
+replay("replay/guard-error-delivery-fits-exactly",
+       f"(sf (q . {D_X + costs.STEP}) (q . 0) (q x) (q . 0))")
+replay("replay/guard-error-delivery-breaches",
+       f"(sf (q . {D_X}) (q . 0) (q x) (q . 0))")
 replay("replay/nested-exact",
        f"(sf (q . {D_OUTER}) (q . 0)"
        f" (q sf (q . {D_INNER}) (q . 0) (q q . 7) (q . 0)) (q . 0))")
@@ -356,7 +315,7 @@ total("unknown/256-is-unknown", "(256 (q . 5) (q . 5))", mach(2) + 2)
 
 replay("replay/unknown-shape1", "(64 (q . 5) (q . 6))")
 replay("replay/unknown-shape2-wide",
-       "(128 (q . 0x0102030405060708090a) (q . 01020304))")
+       "(128 (q . 0x0102030405060708090a) (q . 0x01020304))")
 replay("replay/unknown-multiplier", "(320 (q . 5) (q . 6))")
 
 
@@ -396,9 +355,4 @@ def no_leak_across_budgets():
     return leaked == 0, f"leaked {leaked} bytes"
 case("no-leak-across-budgets", no_leak_across_budgets)
 
-
-fails = [x for x in results if not x[1]]
-for name, ok, out in results:
-    print(f"{'PASS' if ok else 'FAIL'} {name}: {out[:90]}")
-print(f"\n{len(results) - len(fails)}/{len(results)} passed")
-sys.exit(1 if fails else 0)
+report()

@@ -159,10 +159,9 @@ class fn_blleval(FuncClass):
             opfunc = ResolveOpcode(op, workitem.budget)
             if opfunc is None:
                 Element.deref_all(args, env)
-                # A None with either latch set means the scan charge
-                # failed, not that the opcode is unknown.
-                if (not workitem.budget.exhausted
-                        and not workitem.budget.guard_breach):
+                # A None with the budget latched means the scan
+                # charge failed, not that the opcode is unknown.
+                if not workitem.budget.latched:
                     workitem.error(f"invalid opcode {op}")
             else:
                 workitem.new_continuation(opfunc, args, env)
@@ -227,11 +226,14 @@ class fn_apply():
 
 @FuncClass.implements_API
 class fn_softfork(FuncClass):
-    # state structure: nil before the first finished value, then
-    # Cons( count, values ) where values holds the first four values
-    # newest first and count saturates at five, which is enough to
-    # tell the exactly-four shape from every other arity while
-    # keeping the state O(1) whatever the argument count.
+    # state structure: the finished values as a plain list, newest
+    # first, capped at five entries. The first four values are
+    # stored, a fifth becomes a nil sentinel recording only that it
+    # existed, and later values leave the state untouched, so the
+    # list length is the arity saturated at five, enough to tell the
+    # exactly-four shape from every other arity while the state stays
+    # O(1) and allocation-free past the fifth argument whatever the
+    # argument count.
 
     @classmethod
     def step(cls, state : Element, args : Element, env : Any, workitem : Any) -> None:
@@ -249,22 +251,25 @@ class fn_softfork(FuncClass):
     @classmethod
     def feedback(cls, state : Element, value : Element, args : Element, env : Any, workitem : Any) -> None:
         assert not isinstance(value, Error)
-        if state.is_nil():
-            state.deref()
-            newst = Cons(Atom(1), Cons(value, Atom(0)))
+        # The bounded walk reads at most five links.
+        stored = 0
+        walk = state
+        while isinstance(walk, Cons):
+            stored += 1
+            walk = walk.val2
+        if stored < 4:
+            newst = Cons(value, state)
+        elif stored == 4:
+            # Values beyond the fourth are evaluated and discarded:
+            # any arity other than four charges the declared cost
+            # and returns nil, so the state only records that a
+            # fifth value existed, as a nil sentinel, and the value
+            # itself is released rather than kept live to finish.
+            value.deref()
+            newst = Cons(Atom(0), state)
         else:
-            count_el, values = state.steal_children()
-            count = count_el.as_int()
-            count_el.deref()
-            if count < 4:
-                newst = Cons(Atom(count + 1), Cons(value, values))
-            else:
-                # Values beyond the fourth are evaluated and
-                # discarded: any arity other than four charges the
-                # declared cost and returns nil, so only the first
-                # four values and the saturated count matter.
-                value.deref()
-                newst = Cons(Atom(5), values)
+            value.deref()
+            newst = state
         workitem.new_continuation(Func(cls, None, newst), args, env)
 
     @classmethod
@@ -274,14 +279,13 @@ class fn_softfork(FuncClass):
             Element.deref_all(state, env)
             workitem.error("softfork requires positive cost")
             return
-        count_el, values = state.steal_children()
-        count = count_el.as_int()
-        count_el.deref()
         vals = []
+        values = state
         while isinstance(values, Cons):
             v, values = values.steal_children()
             vals.append(v)
         values.deref()
+        count = len(vals)
         vals.reverse()
 
         # The declared cost is hard validity: a wide atom charges its

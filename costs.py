@@ -10,9 +10,18 @@ for review, not settled consensus values.
 
 libbll's cost arithmetic saturates at the uint64 maximum so an
 overflowing charge reads as unpayably large. Python integers are
-unbounded, so no saturation mirror is needed: any amount whose
-saturated value would exceed the limit also exceeds it unsaturated,
-and Budget.charge fails identically for every limit below 2**64.
+unbounded, so no saturation mirror is needed within the consensus
+domain: for atoms within the serialization cap every saturating
+add or multiply chain reaches the uint64 maximum before any
+divided term can truncate below its exact value, so a charge fails
+on one side exactly when it fails on the other for every limit
+below 2**64. Outside that domain the guarantee narrows: an
+API-constructed atom wider than the serialization cap can saturate
+the divided product term of the mul-shaped charges (op_mul and the
+unknown-operator mul shape) before the linear terms saturate the
+total, and libbll then charges less than the exact value here, up
+to the product divisor's factor, observable only under budgets
+near 2**63 that no witness can buy.
 """
 
 # Machine costs: the evaluator's own bookkeeping, independent of any
@@ -87,6 +96,17 @@ MUL_PRODUCT_DIV = 8
 MOD_BASE = 512
 MOD_PER_BYTE = 3
 SHIFT_BASE = 384
+
+
+def mul_fold_work(left_width, right_width):
+    """The work charge of one multiplication fold over operand
+    widths: the carry-loop rate over both operands, the per-limb
+    pass over the wider one, and the divided byte product. Shared
+    by op_mul and the unknown-operator mul shape so the shape's
+    weight-class promise cannot drift from the real fold."""
+    return (ARITH_PER_BYTE * (left_width + right_width)
+            + MULDIV_LIMB_PER_BYTE * max(left_width, right_width)
+            + (left_width * right_width) // MUL_PRODUCT_DIV)
 
 # Hashes: the per-argument cost of the midstate folds, the per-byte
 # compression rate, and the finish cost covering finalization
@@ -228,6 +248,13 @@ class Budget:
         when an unwind abandons the guarded evaluation."""
         self.allowances = []
         self.guard_breach = False
+
+    @property
+    def latched(self):
+        """True once any charge has failed, whichever latch it set.
+        The one predicate call sites need to tell a failed charge
+        from a missing result."""
+        return self.exhausted or self.guard_breach
 
 
 def budget_for_witness_size(witness_size):
