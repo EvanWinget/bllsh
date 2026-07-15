@@ -234,11 +234,14 @@ class WorkItem:
         return wi
 
     def get_partial_func(self, value : Element) -> Optional[Element]:
+        # Only table opcodes can be partially applied: everything
+        # else is rejected through the common None path, which owns
+        # the single deref of value.
         if isinstance(value, Atom):
             opnum = value.as_int()
-            value.deref()
             opcls = Op_FUNCS.get(opnum, None)
             if opcls is not None:
+                value.deref()
                 return Func(fn_op, (opcls, opcls.initial_int_state()), opcls.initial_state())
         elif isinstance(value, Func) and issubclass(value.val1[0], (fn_op, fn_partial)):
             return value
