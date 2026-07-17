@@ -87,6 +87,17 @@ same_result("partial/bind-pass-apply-through-env",
 same_result("partial/i-branch-passes-function-object",
             "(partial (i (q . 1) (partial (q . 34) (q . 0x616263)) (q . 0)))",
             "(sha256 (q . 0x616263))")
+# a bound function object is immutable: extending it twice from the
+# same binding gives two independent results, because every fold
+# copies the wrapped opcode's accumulated state, its internal
+# working state (here a sha256 midstate) included
+same_result("partial/bound-function-object-reused-twice",
+            "(a (q rc (q . 0)"
+            " (partial (partial 1 (q . 98)))"
+            " (partial (partial 1 (q . 99))))"
+            " (partial (q . 34) (q . 97)))",
+            "(rc (q . 0) (sha256 (q . 97) (q . 98))"
+            " (sha256 (q . 97) (q . 99)))")
 
 
 # ---- partial's own argument checks ----
@@ -101,15 +112,28 @@ errs("partial/rejects-apply-number", "(partial (q . 1))",
      "partial: requires a normal opcode")
 errs("partial/rejects-own-number", "(partial (q . 3))",
      "partial: requires a normal opcode")
+errs("partial/rejects-softfork-number", "(partial (q . 2))",
+     "partial: requires a normal opcode")
+errs("partial/rejects-unknown-number", "(partial (q . 43))",
+     "partial: requires a normal opcode")
 errs("partial/rejects-negative-number", "(partial (q . -1))",
      "partial: requires a normal opcode")
 errs("partial/rejects-pair", "(partial (q 1 2))",
      "partial: requires a normal opcode")
 
 # the opcode decode scan: a minimal number is free, a wide
-# non-minimal alias of the same opcode charges every byte
+# non-minimal alias of the same opcode charges every byte, and the
+# threshold sits at machine-integer width: eight bytes scan free,
+# nine charge
 total("partial/result-gate", "(partial (q . 34))",
       mach(1), want="program result contains a function object")
+total("partial/eight-byte-opcode-alias-scans-free",
+      "(partial (q . 0x2200000000000000))",
+      mach(1), want="program result contains a function object")
+total("partial/nine-byte-opcode-alias-charges-scan",
+      "(partial (q . 0x220000000000000000))",
+      mach(1) + atom_scan(9),
+      want="program result contains a function object")
 total("partial/wide-opcode-atom-scan",
       "(partial (q . 0x2200000000000000000000))",
       mach(1) + atom_scan(11),
@@ -185,6 +209,17 @@ case("examine/bigeq-early-exit-skips-unreached",
      lambda: (lambda r, b: (str(r) == "nil" and not b.exhausted,
                             f"result {r}"))(
          *run("(=== (rc (q . 2) (partial (q . 34))) (rc (q . 1) (q . 5)))")))
+# the walk order is normative: head pairs are pushed before tail
+# pairs and the stack pops from the top, so tails are examined
+# first. A tail mismatch answers 0 before the head function object
+# is reached, equal tails let the walk reach it and error
+case("examine/bigeq-walk-order-tail-mismatch-first",
+     lambda: (lambda r, b: (str(r) == "nil" and not b.exhausted,
+                            f"result {r}"))(
+         *run("(=== (rc (q . 1) (partial (q . 34))) (rc (q . 2) (q . 5)))")))
+errs("examine/bigeq-walk-order-heads-reached",
+     "(=== (rc (q . 1) (partial (q . 34))) (rc (q . 1) (q . 5)))",
+     "===: cannot compare a function object")
 # a single-argument comparison never walks, so a function object
 # buried inside its one argument is never examined: === answers its
 # vacuous 1 and = answers its silent nil for the pair, exactly as
@@ -220,6 +255,10 @@ errs("examine/wr", "(wr (partial (q . 34)))",
      "can only serialize atom/cons")
 errs("examine/wr-nested", "(wr (rc (q . 0) (partial (q . 34))))",
      "can only serialize atom/cons")
+# x renders its arguments into the exception message, so the result
+# is that error whatever the argument kinds
+errs("examine/x-renders-function-object", "(x (partial (q . 34)))",
+     "Exception")
 
 
 # ---- unknown operators and softfork positions ----
@@ -240,6 +279,17 @@ errs("sf/cost-position-function-object",
 total("sf/extension-position-function-object",
       "(sf (q . 100) (partial (q . 34)) (q . 7) (q . 0))",
       costs.STEP * 14 + PARG + 100, want="nil")
+# every wrong-arity shape discards its evaluated values, function
+# objects included, and charges exactly the declared cost
+total("sf/arity-2-discards-function-object",
+      "(sf (q . 100) (partial (q . 34)))",
+      costs.STEP * 6 + PARG + 100, want="nil")
+total("sf/arity-3-discards-function-object",
+      "(sf (q . 100) (q . 0) (partial (q . 34)))",
+      costs.STEP * 10 + PARG + 100, want="nil")
+total("sf/arity-5-discards-function-object",
+      "(sf (q . 100) (q . 0) (q . 1) (q . 2) (partial (q . 34)))",
+      costs.STEP * 18 + PARG + 100, want="nil")
 
 # a function object finishing a softfork guard is discarded by the
 # guard's exit frame, never reaching the top-level gate: the atom
@@ -284,6 +334,11 @@ def no_leak_across_budgets():
     srcs = ["(partial (q . 34))",
             "(partial (partial (q . 34) (q . 0x616263)))",
             "(a (q 3 1) (partial (q . 23) (q . 1) (q . 2)))",
+            "(a (q rc (q . 0)"
+            " (partial (partial 1 (q . 98)))"
+            " (partial (partial 1 (q . 99))))"
+            " (partial (q . 34) (q . 97)))",
+            "(sf (q . 100) (partial (q . 34)))",
             "(rc (q . 0) (partial (q . 34)))",
             "(a (partial (q . 34)) (q . 0))",
             "(i (partial (q . 34)) (q . 1) (q . 2))",
