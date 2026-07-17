@@ -299,6 +299,11 @@ class op_lt_num(BinOpcode):
     def binop(cls, budget, left, right):
         if not budget.charge(costs.COMPARE_ARG):
             return None
+        # Rejected ahead of the failed-chain shortcut, so whether an
+        # application is valid never depends on the values of earlier
+        # arguments.
+        if right.is_func():
+            return Error("<: cannot compare a function object")
         if left.is_nil():
             # failed already
             return left.bumpref()
@@ -328,6 +333,12 @@ class op_i(FixOpcode):
     def operation(cls, budget, c, t=None, e=None):
         if not budget.charge(costs.CONTROL_BASE):
             return None
+        # A function object may only be bound, passed on or applied.
+        # Branch selection examines the condition, so a function
+        # object there is an error. The branch values are passed on
+        # unexamined, so they may be function objects.
+        if c.is_func():
+            return Error("i: condition is a function object")
         if c.is_nil():
             return e.bumpref() if e is not None else c.bumpref()
         else:
@@ -504,6 +515,11 @@ class op_l(FixOpcode):
     def operation(cls, budget, lst):
         if not budget.charge(costs.CONTROL_BASE):
             return None
+        # A function object is neither an atom nor a pair, so the
+        # shape question has no honest answer and errors instead of
+        # picking one.
+        if lst.is_func():
+            return Error("l: argument is a function object")
         return Atom(1 if lst.is_cons() else 0)
 
 class op_nand(BinOpcode):
@@ -512,6 +528,11 @@ class op_nand(BinOpcode):
     def binop(cls, budget, left, right):
         if not budget.charge(costs.LOGIC_ARG):
             return None
+        # The truth test examines the argument, and a function object
+        # is neither nil nor a value, so it is an error rather than
+        # silently true.
+        if right.is_func():
+            return Error("notall: argument is a function object")
         if right.is_nil():
             return Atom(1)
         else:
@@ -528,6 +549,10 @@ class op_and(BinOpcode):
     def binop(cls, budget, left, right):
         if not budget.charge(costs.LOGIC_ARG):
             return None
+        # Same rule as notall: a truth test on a function object is
+        # an error.
+        if right.is_func():
+            return Error("all: argument is a function object")
         if right.is_nil():
             return Atom(0)
         else:
@@ -540,6 +565,10 @@ class op_or(BinOpcode):
     def binop(cls, budget, left, right):
         if not budget.charge(costs.LOGIC_ARG):
             return None
+        # Same rule as notall: a truth test on a function object is
+        # an error.
+        if right.is_func():
+            return Error("any: argument is a function object")
         if not right.is_nil():
             return Atom(1)
         else:
@@ -675,11 +704,16 @@ class op_eq(BinOpcode):
     def binop(cls, budget, left, right):
         if not budget.charge(costs.COMPARE_ARG):
             return None
+        # Rejected ahead of the failed-chain shortcut, so whether an
+        # application is valid never depends on the values of earlier
+        # arguments.
+        if right.is_func():
+            return Error("=: cannot compare a function object")
         if left.is_nil():
             # failed already
             return left.bumpref()
         elif not right.is_atom():
-            # non-atoms aren't compared with this opcode
+            # pairs aren't compared with this opcode
             return Atom(0)
         elif left.is_atom():
             # first arg, nothing to be equal to
@@ -711,6 +745,12 @@ class op_bigeq(BinOpcode):
     def binop(cls, budget, left, right):
         if not budget.charge(costs.COMPARE_ARG):
             return None
+        # Rejected ahead of the failed-chain shortcut, so whether an
+        # application is valid never depends on the values of earlier
+        # arguments. Function objects nested inside an argument are
+        # rejected where the walk below reaches them.
+        if right.is_func():
+            return Error("===: cannot compare a function object")
         if left.is_nil():
             # failed already
             return left.bumpref()
@@ -728,6 +768,12 @@ class op_bigeq(BinOpcode):
                 if not budget.charge(costs.BIGEQ_PER_NODE):
                     return None
                 a, b = chk.pop()
+                # The walk examines both nodes, so a function object
+                # on either side is an error, not an inequality. A
+                # node the early exit never reaches is never examined,
+                # the same boundary the charged serializer has.
+                if a.is_func() or b.is_func():
+                    return Error("===: cannot compare a function object")
                 if a.is_atom():
                     if not b.is_atom() or a.val1 != b.val1:
                         return Atom(0)
@@ -833,6 +879,11 @@ class op_lt_str(BinOpcode):
     def binop(cls, budget, left, right):
         if not budget.charge(costs.COMPARE_ARG):
             return None
+        # Rejected ahead of the failed-chain shortcut, so whether an
+        # application is valid never depends on the values of earlier
+        # arguments.
+        if right.is_func():
+            return Error("<s: cannot compare a function object")
         if left.is_nil():
             # failed already
             return left.bumpref()
