@@ -2,7 +2,7 @@
 
 The constants and charging semantics mirror libbll's cost model
 (libbll/src/cost.h in the bll-consensus repository, adopted at its
-commit 15c1a16). The values are calibrated there, one cost unit per
+commit 34573a0). The values are calibrated there, one cost unit per
 nanosecond of measured evaluation time on libbll's pinned calibration
 machine, and adopted here verbatim so differential vectors can pin
 exact charged totals across both implementations. They are proposals
@@ -10,9 +10,18 @@ for review, not settled consensus values.
 
 libbll's cost arithmetic saturates at the uint64 maximum so an
 overflowing charge reads as unpayably large. Python integers are
-unbounded, so no saturation mirror is needed: any amount whose
-saturated value would exceed the limit also exceeds it unsaturated,
-and Budget.charge fails identically for every limit below 2**64.
+unbounded, so no saturation mirror is needed within the consensus
+domain: for atoms within the serialization cap every saturating
+add or multiply chain reaches the uint64 maximum before any
+divided term can truncate below its exact value, so a charge fails
+on one side exactly when it fails on the other for every limit
+below 2**64. Outside that domain the guarantee narrows: an
+API-constructed atom wider than the serialization cap can saturate
+the divided product term of the mul-shaped charges (op_mul and the
+unknown-operator mul shape) before the linear terms saturate the
+total, and libbll then charges less than the exact value here, up
+to the product divisor's factor, observable only under budgets
+near 2**63 that no witness can buy.
 """
 
 # Machine costs: the evaluator's own bookkeeping, independent of any
@@ -88,6 +97,17 @@ MOD_BASE = 512
 MOD_PER_BYTE = 3
 SHIFT_BASE = 384
 
+
+def mul_fold_work(left_width, right_width):
+    """The work charge of one multiplication fold over operand
+    widths: the carry-loop rate over both operands, the per-limb
+    pass over the wider one, and the divided byte product. Shared
+    by op_mul and the unknown-operator mul shape so the shape's
+    weight-class promise cannot drift from the real fold."""
+    return (ARITH_PER_BYTE * (left_width + right_width)
+            + MULDIV_LIMB_PER_BYTE * max(left_width, right_width)
+            + (left_width * right_width) // MUL_PRODUCT_DIV)
+
 # Hashes: the per-argument cost of the midstate folds, the per-byte
 # compression rate, and the finish cost covering finalization
 # including the double-hash opcodes' second compression pass. One
@@ -140,6 +160,13 @@ WR_BASE = 224
 WR_PER_ELEMENT = 4
 WR_PER_BYTE = 1
 
+# Softfork guard machinery: the flat cost of entering and leaving a
+# recognized softfork guard (allowance push, exit frame, exactness
+# check, pop and nil delivery), charged against the guard's declared
+# allowance at entry so both validator classes charge exactly the
+# declared cost.
+GUARD = 56
+
 # The budget bought by one evaluation's witness bytes, the BIP342
 # tapscript analog in nanosecond units: one signature check per 50
 # witness bytes priced at the measured verification time.
@@ -163,23 +190,71 @@ class Budget:
     exhausted: that charge and every later one fail, including free
     ones. The failed charge sets used to the full limit, so an
     exhausted evaluation reports exactly the budget it was given,
-    which is what makes the boundary replay contract exact."""
+    which is what makes the boundary replay contract exact.
+
+    A softfork guard prepays its declared cost as one lump and then
+    routes every charge inside the guard to an allowance of exactly
+    that amount, so the outer counter never moves while a guard is
+    active. A charge that does not fit the innermost allowance sets
+    the sticky guard_breach flag instead of the exhausted latch: the
+    outer budget may have room, so breach is a program outcome (the
+    guarded program overran its declaration), not exhaustion. The
+    two latches are mutually exclusive because no charge can reach
+    the outer counter while an allowance is active, and no allowance
+    can exist unless its lump already fit."""
 
     def __init__(self, limit):
         self.limit = limit
         self.used = 0
         self.exhausted = False
+        self.allowances = []
+        self.guard_breach = False
 
     def charge(self, amount):
-        """Spends amount. Charged before the work it covers. False
-        once the budget is exhausted. A zero charge always fits until
-        the budget latches."""
-        if self.exhausted or amount > self.limit - self.used:
+        """Spends amount, against the innermost guard allowance if
+        one is active, else against the budget itself. Charged before
+        the work it covers. False once either latch is set. A zero
+        charge always fits until then."""
+        if self.exhausted or self.guard_breach:
+            return False
+        if self.allowances:
+            allowed, used = self.allowances[-1]
+            if amount > allowed - used:
+                self.guard_breach = True
+                return False
+            self.allowances[-1] = (allowed, used + amount)
+            return True
+        if amount > self.limit - self.used:
             self.exhausted = True
             self.used = self.limit
             return False
         self.used += amount
         return True
+
+    def push_allowance(self, allowed):
+        """Opens a guard allowance. Every charge until the matching
+        pop spends this allowance, whose lump the enclosing context
+        already paid."""
+        self.allowances.append((allowed, 0))
+
+    def pop_allowance(self):
+        """Closes the innermost guard allowance and reports whether
+        it was consumed exactly."""
+        allowed, used = self.allowances.pop()
+        return used == allowed
+
+    def clear_allowances(self):
+        """Discards all guard allowances and the breach latch, used
+        when an unwind abandons the guarded evaluation."""
+        self.allowances = []
+        self.guard_breach = False
+
+    @property
+    def latched(self):
+        """True once any charge has failed, whichever latch it set.
+        The one predicate call sites need to tell a failed charge
+        from a missing result."""
+        return self.exhausted or self.guard_breach
 
 
 def budget_for_witness_size(witness_size):

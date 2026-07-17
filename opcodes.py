@@ -252,10 +252,7 @@ class op_mul(BinOpcode):
             # The schoolbook product runs one pass per limb of one
             # operand over the other: the divided byte product plus
             # a per-pass overhead linear in the wider operand.
-            work = (costs.ARITH_PER_BYTE * (left.val1 + right.val1)
-                    + costs.MULDIV_LIMB_PER_BYTE * max(left.val1, right.val1)
-                    + (left.val1 * right.val1) // costs.MUL_PRODUCT_DIV)
-            if not budget.charge(work):
+            if not budget.charge(costs.mul_fold_work(left.val1, right.val1)):
                 return None
             enc = int_to_bytes(left.as_int() * right.as_int())
             cap = cls.size_cap()
@@ -302,6 +299,11 @@ class op_lt_num(BinOpcode):
     def binop(cls, budget, left, right):
         if not budget.charge(costs.COMPARE_ARG):
             return None
+        # Rejected ahead of the failed-chain shortcut, so whether an
+        # application is valid never depends on the values of earlier
+        # arguments.
+        if right.is_func():
+            return Error("<: cannot compare a function object")
         if left.is_nil():
             # failed already
             return left.bumpref()
@@ -331,6 +333,12 @@ class op_i(FixOpcode):
     def operation(cls, budget, c, t=None, e=None):
         if not budget.charge(costs.CONTROL_BASE):
             return None
+        # A function object may only be bound, passed on or applied.
+        # Branch selection examines the condition, so a function
+        # object there is an error. The branch values are passed on
+        # unexamined, so they may be function objects.
+        if c.is_func():
+            return Error("i: condition is a function object")
         if c.is_nil():
             return e.bumpref() if e is not None else c.bumpref()
         else:
@@ -507,6 +515,11 @@ class op_l(FixOpcode):
     def operation(cls, budget, lst):
         if not budget.charge(costs.CONTROL_BASE):
             return None
+        # A function object is neither an atom nor a pair, so the
+        # shape question has no honest answer and errors instead of
+        # picking one.
+        if lst.is_func():
+            return Error("l: argument is a function object")
         return Atom(1 if lst.is_cons() else 0)
 
 class op_nand(BinOpcode):
@@ -515,6 +528,11 @@ class op_nand(BinOpcode):
     def binop(cls, budget, left, right):
         if not budget.charge(costs.LOGIC_ARG):
             return None
+        # The truth test examines the argument, and a function object
+        # is neither nil nor a value, so it is an error rather than
+        # silently true.
+        if right.is_func():
+            return Error("notall: argument is a function object")
         if right.is_nil():
             return Atom(1)
         else:
@@ -531,6 +549,10 @@ class op_and(BinOpcode):
     def binop(cls, budget, left, right):
         if not budget.charge(costs.LOGIC_ARG):
             return None
+        # Same rule as notall: a truth test on a function object is
+        # an error.
+        if right.is_func():
+            return Error("all: argument is a function object")
         if right.is_nil():
             return Atom(0)
         else:
@@ -543,6 +565,10 @@ class op_or(BinOpcode):
     def binop(cls, budget, left, right):
         if not budget.charge(costs.LOGIC_ARG):
             return None
+        # Same rule as notall: a truth test on a function object is
+        # an error.
+        if right.is_func():
+            return Error("any: argument is a function object")
         if not right.is_nil():
             return Atom(1)
         else:
@@ -678,11 +704,16 @@ class op_eq(BinOpcode):
     def binop(cls, budget, left, right):
         if not budget.charge(costs.COMPARE_ARG):
             return None
+        # Rejected ahead of the failed-chain shortcut, so whether an
+        # application is valid never depends on the values of earlier
+        # arguments.
+        if right.is_func():
+            return Error("=: cannot compare a function object")
         if left.is_nil():
             # failed already
             return left.bumpref()
         elif not right.is_atom():
-            # non-atoms aren't compared with this opcode
+            # pairs aren't compared with this opcode
             return Atom(0)
         elif left.is_atom():
             # first arg, nothing to be equal to
@@ -714,6 +745,12 @@ class op_bigeq(BinOpcode):
     def binop(cls, budget, left, right):
         if not budget.charge(costs.COMPARE_ARG):
             return None
+        # Rejected ahead of the failed-chain shortcut, so whether an
+        # application is valid never depends on the values of earlier
+        # arguments. Function objects nested inside an argument are
+        # rejected where the walk below reaches them.
+        if right.is_func():
+            return Error("===: cannot compare a function object")
         if left.is_nil():
             # failed already
             return left.bumpref()
@@ -731,6 +768,12 @@ class op_bigeq(BinOpcode):
                 if not budget.charge(costs.BIGEQ_PER_NODE):
                     return None
                 a, b = chk.pop()
+                # The walk examines both nodes, so a function object
+                # on either side is an error, not an inequality. A
+                # node the early exit never reaches is never examined,
+                # the same boundary the charged serializer has.
+                if a.is_func() or b.is_func():
+                    return Error("===: cannot compare a function object")
                 if a.is_atom():
                     if not b.is_atom() or a.val1 != b.val1:
                         return Atom(0)
@@ -836,6 +879,11 @@ class op_lt_str(BinOpcode):
     def binop(cls, budget, left, right):
         if not budget.charge(costs.COMPARE_ARG):
             return None
+        # Rejected ahead of the failed-chain shortcut, so whether an
+        # application is valid never depends on the values of earlier
+        # arguments.
+        if right.is_func():
+            return Error("<s: cannot compare a function object")
         if left.is_nil():
             # failed already
             return left.bumpref()
@@ -1279,6 +1327,71 @@ class op_tx(BinOpcode):
              return out.scriptPubKey
         else:
              return b''
+
+# Operator numbers with no table entry, from 0 up to but excluding
+# UNKNOWN_OP_RANGE, succeed as unknown operators: nil result, cost
+# derived from the number itself so future operators can pre-declare
+# their weight class. Negative numbers stay invalid as the reserved
+# hard-failing range (the analog of CLVM's 0xffff prefix, which is
+# its very-negative region under a signed read), and numbers at or
+# beyond UNKNOWN_OP_RANGE stay invalid (the analog of CLVM's five
+# byte opcode ceiling, keeping the multiplier below 2**32).
+UNKNOWN_OP_RANGE = 2**40
+
+class op_unknown(IntStateOpcode):
+    """The unknown-operator rule. Not a FUNCS entry: ResolveOpcode
+    constructs this opcode directly for eligible numbers. Bits 6 and
+    7 of the operator number select one of four charging shapes
+    priced by the analogous real opcode family's constants, bits 8
+    and up are a multiplier applied as multiplier plus one so cost is
+    never zero, and the low 6 bits are ignored so a family of future
+    operators can share one weight class. No work happens per
+    argument beyond tuple arithmetic riding the step charge, so the
+    whole shape cost is charged once at finish. The int state tuple
+    is (selector, multiplier, count, byte_total, work)."""
+
+    @classmethod
+    def from_opnum(cls, opnum):
+        assert 0 <= opnum < UNKNOWN_OP_RANGE
+        return ((opnum >> 6) & 3, opnum >> 8, 0, 0, 0)
+
+    @classmethod
+    def update_state(cls, budget, int_state, arg):
+        selector, multiplier, count, byte_total, work = int_state
+        if selector == 0:
+            # A flat shape: arguments of any kind are accepted and
+            # ignored.
+            return int_state
+        if not arg.is_atom():
+            return Error("unknown op requires an atom")
+        width = arg.val1
+        if selector == 2:
+            # The mul shape prices each fold after the first like the
+            # real op_mul fold over the widths a running product
+            # would reach, byte_total carrying the product width,
+            # through the same shared work function op_mul charges.
+            if count > 0:
+                work += costs.ARITH_ARG + costs.mul_fold_work(byte_total, width)
+        return (selector, multiplier, count + 1, byte_total + width, work)
+
+    @classmethod
+    def final_state(cls, budget, int_state):
+        selector, multiplier, count, byte_total, work = int_state
+        if selector == 1:
+            # The arith shape prices like the bignum folds.
+            total = costs.ARITH_ARG * count + costs.ARITH_PER_BYTE * byte_total
+        elif selector == 2:
+            total = work
+        elif selector == 3:
+            # The cat shape prices one copied and allocated pass over
+            # the arguments.
+            total = (costs.CAT_ARG * count
+                     + (costs.COPY_PER_BYTE + costs.MALLOC_PER_BYTE) * byte_total)
+        else:
+            total = 0
+        if not budget.charge(max(total, 1) * (multiplier + 1)):
+            return None
+        return Atom(0)
 
 FUNCS = [
 #  (b'', "q", None), # quoting indicator, special

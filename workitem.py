@@ -123,7 +123,10 @@ class fn_partial(FuncClass):
             if opfunc is None:
                 env.deref()
                 args.deref()
-                workitem.error(f"partial: requires a normal opcode as first argument not {value}")
+                # A None with the budget latched means the decode's
+                # scan charge failed, not that the value was rejected.
+                if not workitem.budget.latched:
+                    workitem.error(f"partial: requires a normal opcode as first argument not {value}")
                 value.deref()
                 return
             value.deref()

@@ -453,12 +453,15 @@ class WorkItem:
         c = self.continuations.pop()
         fnobj, state = c.fn.steal_func()
         fnobj.step(state, c.args, c.localsyms, self)
-        if self.budget.exhausted and (not self.continuations
+        if self.budget.latched and (not self.continuations
                 or self.continuations[-1].fn.val1[0] != fn_fin):
             # A latched budget makes the shared opcode machinery drop
             # its work without delivering a value, so the driver loop
             # would otherwise pop an emptied stack. Abort like the
-            # cost overrun below.
+            # cost overrun below. Checking the combined latch keeps
+            # this safe if the softfork guard machinery ever becomes
+            # reachable from the symbolic evaluator, whose symbol
+            # table has no sf entry today.
             self.error("budget exhausted, aborting")
         self.costleft -= 1
         if self.costleft <= 0 and self.continuations[-1].fn.val1[0] != fn_fin:
