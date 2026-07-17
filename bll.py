@@ -406,6 +406,14 @@ class WorkItem:
         # operators and unknown operators are rejected through the
         # common None path, which owns the single deref of value.
         if isinstance(value, Atom):
+            # The opcode decode reads the whole atom, so a wide
+            # non-minimal number charges its scan before it is read,
+            # the rule every operator position pays. A None return
+            # with the budget latched means this charge failed, not
+            # that the value was rejected.
+            if not self.budget.charge(atom_scan(value.val1)):
+                value.deref()
+                return None
             opnum = value.as_int()
             opcls = Op_FUNCS.get(opnum, None)
             if opcls is not None:
