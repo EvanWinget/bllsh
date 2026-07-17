@@ -128,8 +128,13 @@ class fn_blleval(FuncClass):
         state.deref()
 
         if not isinstance(args, Error) and not args.is_bll():
-            # XXX should handle partial funcs here i guess?
-            workitem.error(f"tried to eval something weird {args}")
+            # A program is bll code, and a value that is or contains
+            # a function object is not code. This is the surface an
+            # apply or guarded-program expression reaches when its
+            # program operand came from a partial application, since
+            # quoted and deserialized programs are bll by
+            # construction.
+            workitem.error("cannot evaluate a function object")
             Element.deref_all(args, env)
             return
 
@@ -475,6 +480,15 @@ class WorkItem:
         assert self.finished()
         r = self.continuations[0].args.bumpref()
         self.continuations.pop().deref()
+        # The result of a program is a value. A function object has
+        # no serialized form, and a pair containing one is not a
+        # bll value by construction, so one kind check covers the
+        # whole tree. The gate applies only here at top level: a
+        # function object finishing a softfork guard was already
+        # discarded by the guard's exit frame.
+        if not r.is_bll() and not isinstance(r, Error):
+            r.deref()
+            return Error("program result contains a function object")
         return r
 
 def eval(sexpr : Element, globalenv : Element, budget : Optional[Budget] = None) -> Element:
