@@ -11,15 +11,19 @@ be regenerated and audited. Run from the repository root:
     python3 examples/gen-test-context.py htlc
     python3 examples/gen-test-context.py p2d
     python3 examples/gen-test-context.py singleton
+    python3 examples/gen-test-context.py commitment
 
 The output is a block of REPL commands (tx, tx_in_idx, tx_script, utxos)
 followed by def lines for the signatures and other witness data, ready to
 paste into the example files.
 
-The leaf script bytes are placeholders. The REPL evaluates the symbll
-program directly and never checks that it matches the committed script,
-so any bytes work as long as the control block, the utxo scriptPubKey
-and tx_script agree with each other.
+For every target except commitment the leaf script bytes are
+placeholders. The REPL evaluates the symbll program directly and never
+checks that it matches the committed script, so any bytes work as long
+as the control block, the utxo scriptPubKey and tx_script agree with
+each other. The commitment target instead drives the spend command,
+which validates the committed leaf script as the program, so there the
+leaf script bytes are the real serialized bll program.
 """
 
 import struct
@@ -27,7 +31,9 @@ import sys
 
 sys.path.insert(0, ".")
 
+import bll
 from element import Atom, Cons, SExpr, SerDeser
+from spend import LEAF_VERSION_BLL
 from verystable.core import messages
 from verystable.core.key import TaggedHash, compute_xonly_pubkey, sign_schnorr, tweak_add_pubkey
 from verystable.core.messages import COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, ser_string
@@ -50,6 +56,8 @@ KEY_P2D_DEST2 = (44).to_bytes(32, "big")
 KEY_SGL_INNER = (51).to_bytes(32, "big")
 KEY_SGL_IPK = (52).to_bytes(32, "big")
 KEY_SGL_DEST = (53).to_bytes(32, "big")
+KEY_CMT_SIG = (61).to_bytes(32, "big")
+KEY_CMT_IPK = (62).to_bytes(32, "big")
 
 FUNDING_TXID = int.from_bytes(bytes(range(32)), "little")
 FUNDING_TXID_ALT = int.from_bytes(bytes(range(32, 64)), "little")
@@ -126,14 +134,19 @@ def emit_context(label, tx, utxo, script):
     emit_context2(label, tx, [utxo], script)
 
 
-def sig_for_at(priv, tx, utxos, script, idx):
+# A target spending a non tapscript leaf must pass leaf_ver: the
+# default preserves the tapscript message of the earlier targets,
+# and a commitment style spend signed under it fails validation
+# with a bare signature error.
+def sig_for_at(priv, tx, utxos, script, idx, leaf_ver=LEAF_VERSION_TAPSCRIPT):
     msg = TaprootSignatureHash(txTo=tx, spent_utxos=utxos, hash_type=0,
-                               input_index=idx, scriptpath=True, script=script)
+                               input_index=idx, scriptpath=True, script=script,
+                               leaf_ver=leaf_ver)
     return sign_schnorr(priv, msg)
 
 
-def sig_for(priv, tx, utxo, script):
-    return sig_for_at(priv, tx, [utxo], script, 0)
+def sig_for(priv, tx, utxo, script, leaf_ver=LEAF_VERSION_TAPSCRIPT):
+    return sig_for_at(priv, tx, [utxo], script, 0, leaf_ver)
 
 
 def wr(element):
@@ -483,11 +496,99 @@ def gen_singleton():
     print(f"def SIGJ 0x{sig_for(KEY_SGL_INNER, txj, utxoj, script).hex()}")
 
 
+def serialize_bll(src):
+    """Serialized bll program bytes for a named-opcode source string."""
+    se = SExpr.parse(src)
+    p = bll.ToBLL(se)
+    se.deref()
+    b = SerDeser.Serialize(p)
+    p.deref()
+    return b
+
+
+def serialize_atom(payload):
+    """Serialized single-atom element, for witness environment items."""
+    a = Atom(payload)
+    b = SerDeser.Serialize(a)
+    a.deref()
+    return b
+
+
+def gen_commitment():
+    """Spends of an output committing a bll program under the bll leaf
+    version, driven through the spend command. The program is the
+    simplest real contract, a signature check over the transaction:
+
+        (bip340_verify (q . PUB) (bip342_txmsg) 1)
+
+    with the pubkey quoted inside the committed program and the
+    signature as the whole witness environment. The signature message
+    commits to the leaf script under the executing leaf version taken
+    from the control block, so the 0xc2 contexts sign a message no
+    tapscript path could share."""
+    pub = xonly(KEY_CMT_SIG)
+    ipk = xonly(KEY_CMT_IPK)
+    src = f"(bip340_verify (q . 0x{pub.hex()}) (bip342_txmsg) 1)"
+    program = serialize_bll(src)
+    leaf = TaggedHash("TapLeaf", bytes([LEAF_VERSION_BLL]) + ser_string(program))
+    spk, parity = taproot_spk(ipk, leaf, [])
+    cb = bytes([LEAF_VERSION_BLL | parity]) + ipk
+
+    def spend_tx(env):
+        tx, utxo = make_tx(spk, [(FUNDING_VALUE - 1000, p2tr_raw(pub))],
+                           0xffffffff, 0, program, cb)
+        tx.wit.vtxinwit[0].scriptWitness.stack = [env, program, cb]
+        return tx, utxo
+
+    tx, utxo = spend_tx(b"")
+    sig = sig_for(KEY_CMT_SIG, tx, utxo, program, leaf_ver=LEAF_VERSION_BLL)
+    tx, utxo = spend_tx(serialize_atom(sig))
+
+    print(f"; program: {src}")
+    print(f"; leaf script: {program.hex()}")
+    print(f"; leaf hash: {leaf.hex()}")
+    print()
+    print("; context A: the valid spend")
+    print(f"spend 0 {tx.serialize_with_witness().hex()} {utxo.serialize().hex()}")
+    print()
+
+    bad = sig[:-1] + bytes([sig[-1] ^ 1])
+    txb, utxo = spend_tx(serialize_atom(bad))
+    print("; context B: one signature bit flipped")
+    print(f"spend 0 {txb.serialize_with_witness().hex()} {utxo.serialize().hex()}")
+    print()
+
+    # A fixed redundant encoding (a length prefixed one byte atom
+    # below 0x80), constant so regeneration cannot land on signature
+    # bytes whose 0x81 prefixed form happens to be canonical.
+    txc, utxo = spend_tx(b"\x81\x05")
+    print("; context C: redundantly encoded environment")
+    print(f"spend 0 {txc.serialize_with_witness().hex()} {utxo.serialize().hex()}")
+    print()
+
+    txd, utxo = spend_tx(serialize_atom(sig))
+    txd.wit.vtxinwit[0].scriptWitness.stack.insert(0, b"\x01")
+    print("; context D: a fourth witness stack item")
+    print(f"spend 0 {txd.serialize_with_witness().hex()} {utxo.serialize().hex()}")
+    print()
+
+    leaf_ts = tapleaf_hash(program)
+    spk_ts, parity_ts = taproot_spk(ipk, leaf_ts, [])
+    cb_ts = bytes([LEAF_VERSION_TAPSCRIPT | parity_ts]) + ipk
+    txe, utxoe = make_tx(spk_ts, [(FUNDING_VALUE - 1000, p2tr_raw(pub))],
+                         0xffffffff, 0, program, cb_ts)
+    sig_ts = sig_for(KEY_CMT_SIG, txe, utxoe, program)
+    txe.wit.vtxinwit[0].scriptWitness.stack = [serialize_atom(sig_ts), program, cb_ts]
+    print("; context E: the same program committed under leaf version 0xc0")
+    print(f"spend 0 {txe.serialize_with_witness().hex()} {utxoe.serialize().hex()}")
+
+
 def main():
     targets = {"vault": gen_vault, "flexmarks": gen_flexmarks, "htlc": gen_htlc,
-               "p2d": gen_p2d, "singleton": gen_singleton}
+               "p2d": gen_p2d, "singleton": gen_singleton,
+               "commitment": gen_commitment}
     if len(sys.argv) != 2 or sys.argv[1] not in targets:
-        print(f"usage: {sys.argv[0]} {{vault|flexmarks|htlc|p2d|singleton}}", file=sys.stderr)
+        print(f"usage: {sys.argv[0]} {{vault|flexmarks|htlc|p2d|singleton|commitment}}", file=sys.stderr)
         return 1
     targets[sys.argv[1]]()
     return 0

@@ -1,0 +1,86 @@
+; test-commitment - the commitment and witness layout, driven end to end
+;
+; The first spend-shaped exercise of the witness model: a bll program
+; committed as the body of a taproot leaf under the bll leaf version
+; 0xc2, spent through the repl's spend command, which validates the
+; real transaction instead of trusting four separately set context
+; pieces. What the other corpus examples assume, this one checks:
+;
+;   - the executing program is the committed leaf script, so (tx 6)
+;     is the hash of the program that actually runs
+;   - the witness stack after the optional annex is exactly the
+;     environment element, the leaf script and the control block
+;   - the environment and the leaf script are canonically encoded,
+;     one unique serialization each, and a redundant encoding refuses
+;   - the budget is bought by the input's serialized witness bytes
+;   - the verdict is the acceptance predicate: a truthy result is
+;     valid, an error, a nil result or an exhausted budget is not
+;
+; The committed program is the simplest real contract, a
+; pay-to-pubkey:
+;
+;   (bip340_verify (q . 0x754e3239f325570cdbbf4a87deee8a66b7f2b33479d468fbc1a50743bf56cc18) (bip342_txmsg) 1)
+;
+; The pubkey constant is quoted inside the committed program, so the
+; taproot commitment binds it with no further rule. That binding is
+; the property the singleton port's GENESIS and INNER arguments are
+; waiting on, restored by committing constants in the program body
+; rather than passing them as witness arguments.
+;
+; The signature message commits to the executing leaf: bip342_txmsg
+; takes the leaf version from the control block, so context A's
+; signature is over a message naming the same tapleaf hash (tx 6)
+; returns, and no tapscript path could share it. The oracle
+; originally hardcoded tapscript's version here, fixed in this unit
+; (decided 2026-07-18, Evan) and pinned by the sighash case in
+; test-spend.py.
+;
+; All hex constants below were produced by
+;   python3 examples/gen-test-context.py commitment
+; The committed leaf script is
+;   ff26ffff80a0754e3239f325570cdbbf4a87deee8a66b7f2b33479d468fbc1a50743bf56cc18ffff2a80ff0180
+; and its 0xc2 tapleaf hash is
+;   bd07f2eeb985e930ca48abb1a2169a565fba14758325a7077ed2b65065d9a856
+;
+; Run with
+;   python3 examples/run-examples.py examples/test-commitment
+; which checks every "; expect:" marker below, or interactively with
+;   echo "import examples/test-commitment" | ./bllsh
+
+; -------------------------------------------------------------------
+; context A: the valid spend, and the context it derives
+
+spend 0 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000ffffffff01b882010000000000225120754e3239f325570cdbbf4a87deee8a66b7f2b33479d468fbc1a50743bf56cc180342c040167d9c8dc558c639a58ab8f9c4a2ad2525afca33fa61c6a811450f5908a2c775248583dd1f2b62ed13fa9073af8fd3d0b1c4161b300c4284039b52adc01ae6782dff26ffff80a0754e3239f325570cdbbf4a87deee8a66b7f2b33479d468fbc1a50743bf56cc18ffff2a80ff018021c3108443b948d1553584a271333f7fbd043c4d66a91706edecbf07f6894c04f29900000000 a08601000000000022512006e8b42f1b6e17f28cc00842fad5746a976c412892ca5ef7ba460e9385286d68
+; expect: valid
+
+; the spend set the introspection context as one derivation, and the
+; executing program is the committed leaf: (tx 6) is its hash
+blleval (= (tx (q . 6)) (q . 0xbd07f2eeb985e930ca48abb1a2169a565fba14758325a7077ed2b65065d9a856))
+; expect: 1
+
+; -------------------------------------------------------------------
+; context B: one signature bit flipped, the contract itself refuses
+
+spend 0 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000ffffffff01b882010000000000225120754e3239f325570cdbbf4a87deee8a66b7f2b33479d468fbc1a50743bf56cc180342c040167d9c8dc558c639a58ab8f9c4a2ad2525afca33fa61c6a811450f5908a2c775248583dd1f2b62ed13fa9073af8fd3d0b1c4161b300c4284039b52adc01ae6792dff26ffff80a0754e3239f325570cdbbf4a87deee8a66b7f2b33479d468fbc1a50743bf56cc18ffff2a80ff018021c3108443b948d1553584a271333f7fbd043c4d66a91706edecbf07f6894c04f29900000000 a08601000000000022512006e8b42f1b6e17f28cc00842fad5746a976c412892ca5ef7ba460e9385286d68
+; expect: invalid: bip340_verify: invalid, non-empty signature
+
+; -------------------------------------------------------------------
+; context C: the same signature encoded redundantly, refused at the
+; boundary before evaluation, since a witness has one valid encoding
+
+spend 0 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000ffffffff01b882010000000000225120754e3239f325570cdbbf4a87deee8a66b7f2b33479d468fbc1a50743bf56cc18030281052dff26ffff80a0754e3239f325570cdbbf4a87deee8a66b7f2b33479d468fbc1a50743bf56cc18ffff2a80ff018021c3108443b948d1553584a271333f7fbd043c4d66a91706edecbf07f6894c04f29900000000 a08601000000000022512006e8b42f1b6e17f28cc00842fad5746a976c412892ca5ef7ba460e9385286d68
+; expect: invalid: environment: witness element not canonical: one byte atom with length prefix
+
+; -------------------------------------------------------------------
+; context D: a fourth witness stack item, refused by the fixed layout
+; so nobody can pad a third party's witness with extra items
+
+spend 0 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000ffffffff01b882010000000000225120754e3239f325570cdbbf4a87deee8a66b7f2b33479d468fbc1a50743bf56cc1804010142c040167d9c8dc558c639a58ab8f9c4a2ad2525afca33fa61c6a811450f5908a2c775248583dd1f2b62ed13fa9073af8fd3d0b1c4161b300c4284039b52adc01ae6782dff26ffff80a0754e3239f325570cdbbf4a87deee8a66b7f2b33479d468fbc1a50743bf56cc18ffff2a80ff018021c3108443b948d1553584a271333f7fbd043c4d66a91706edecbf07f6894c04f29900000000 a08601000000000022512006e8b42f1b6e17f28cc00842fad5746a976c412892ca5ef7ba460e9385286d68
+; expect: invalid: witness stack must be environment, leaf script, control block
+
+; -------------------------------------------------------------------
+; context E: the same program committed under leaf version 0xc0,
+; which is a tapscript leaf, not a bll spend
+
+spend 0 02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000ffffffff01b882010000000000225120754e3239f325570cdbbf4a87deee8a66b7f2b33479d468fbc1a50743bf56cc180342c0401dbd24912363a45e6cf1c8c9e7ad5019088febdd747fb6c58ff341f8d5571935d3bb107352518163334615936246421d9932a17e4687babef7f0329636ef30502dff26ffff80a0754e3239f325570cdbbf4a87deee8a66b7f2b33479d468fbc1a50743bf56cc18ffff2a80ff018021c1108443b948d1553584a271333f7fbd043c4d66a91706edecbf07f6894c04f29900000000 a08601000000000022512015febc787b4cce0995d430f19e51f95b1565e3f86b8c94a8f1d4428d900cb8e9
+; expect: invalid: leaf version is not bll
