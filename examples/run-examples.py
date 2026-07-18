@@ -40,12 +40,13 @@ CORPUS = [
     "examples/test-flexmarks-htlc",
     "examples/test-p2-delegated",
     "examples/test-singleton",
+    "examples/test-commitment",
 ]
 
 MARKER = "; expect:"
 
 # commands whose result must be asserted by a marker
-CHECKED = ("eval", "blleval")
+CHECKED = ("eval", "blleval", "spend")
 
 
 def load_repl_class(root):
