@@ -6,14 +6,14 @@
 ; Chia-Network/chia_puzzles release 0.20.3
 ; (d122456feeef55708d354a065623037bfa010714). The coin owner signs a
 ; delegated program, graftroot style, and the spender runs it against
-; a solution of their choosing. The signature covers the program, not
-; the solution and not the rest of the transaction, so the delegate
+; arguments of their choosing. The signature covers the program, not
+; the arguments and not the rest of the transaction, so the delegate
 ; alone decides what the spend may do.
 ;
 ; Block map from the source to this port:
 ;   mod parameters (SYNTHETIC_PUBLIC_KEY original_public_key
 ;     delegated_puzzle solution) -> def parameters (SYNPK ORIGPK
-;     DELEG SOL), plus an explicit SIG parameter
+;     DELEG ARGS), plus an explicit SIG parameter
 ;   sha256tree1 -> SHA256TREE, the same algorithm: leaves hash under
 ;     a 1 prefix, pairs under a 2 prefix
 ;   is_hidden_puzzle_correct -> not ported, see below
@@ -21,7 +21,7 @@
 ;     branch becomes the ORIGPK refusal, the AGG_SIG_ME condition
 ;     becomes the bip340_verify assertion, and prepending conditions
 ;     becomes requiring the delegate's result to be truthy
-;   (a delegated_puzzle solution) -> (a DELEG SOL)
+;   (a delegated_puzzle solution) -> (a DELEG ARGS)
 ;
 ; Deviations, each with its reason:
 ;   1. The hidden puzzle half is not ported. Revealing a pre-committed
@@ -75,9 +75,9 @@ def DELEGANY (q 0 . 1)
 ; DELEGCOV is (= (tx 3) 2): the spend must have exactly two outputs,
 ; the output count is a minimal int so = is safe here
 def DELEGCOV (q 14 (41 (0 . 3)) (0 . 2))
-; DELEGSOL is (= 1 (q . 5)) with 1 the whole environment: the
-; solution must be the atom 5
-def DELEGSOL (q 14 1 (0 . 5))
+; DELEGARG is (= 1 (q . 5)) with 1 the whole environment: the
+; delegate's argument must be the atom 5
+def DELEGARG (q 14 1 (0 . 5))
 
 ; sha256tree1 from the source: hash a program tree, leaves under a
 ; 1 prefix, pairs under a 2 prefix
@@ -87,7 +87,7 @@ def (SHA256TREE T) (if (l T) (sha256 2 (SHA256TREE (h T)) (SHA256TREE (t T))) (s
 ; ORIGPK branch is the unported hidden puzzle half. The signature
 ; check raises on a bad signature and the delegate raises or returns
 ; nil on refusal, so all is safe even though it is eager.
-def (P2D SYNPK ORIGPK DELEG SOL SIG) (if ORIGPK (x "p2d: hidden puzzle path not ported") (if (all (bip340_verify SYNPK (sha256 (SHA256TREE DELEG) (tx 11) (tx 12)) SIG) (a DELEG SOL)) 1 (x "p2d: delegated spend not authorized")))
+def (P2D SYNPK ORIGPK DELEG ARGS SIG) (if ORIGPK (x "p2d: hidden path not ported") (if (all (bip340_verify SYNPK (sha256 (SHA256TREE DELEG) (tx 11) (tx 12)) SIG) (a DELEG ARGS)) 1 (x "p2d: delegated spend not authorized")))
 
 ; the tree hashes the signatures below commit to, pinned against the
 ; generator's Python computation
@@ -95,7 +95,7 @@ eval (SHA256TREE (DELEGANY))
 ; expect: 0xc92b0c6bcabde5fa4d0d37cc741c5c50fe019e4eeacea5d8fd7385f672e2c3f3
 eval (SHA256TREE (DELEGCOV))
 ; expect: 0x0393e38f7b9973c3a0320390d0cc48d6cccc2c8cc09a2ebc4cd3aa207e3509e7
-eval (SHA256TREE (DELEGSOL))
+eval (SHA256TREE (DELEGARG))
 ; expect: 0x93ed957ea9e265231e1c240618111e2e505b3d55a94039799e14741ffc969758
 
 ; -------------------------------------------------------------------
@@ -107,14 +107,14 @@ utxos a086010000000000225120cbd9bf4a2e6de4f92206753f18f1ff7c0b71925a058311266041
 
 def SIGANYA 0x568cd2f0a4244d6d9cd7b684fc4c2052ce8027dcd0eac8970b2ada7b48c5c4da45be7ef4e046a9b792ffd5501575005e487b6bf758f5c72e2eb728305d15b7aa
 def SIGCOVA 0x965398b4b647c8210c2cfda1b0f7cbf1fac9c0d02c42a4fe761316e2a2db33eb98f122afa538e0999274a86491ba0462528c940601b5dde7ffe986b67c080aa3
-def SIGSOLA 0x86fa420063b170c6b69472cbd3e94bccd68ba8abf23d11ab2c7ca2d5c5d54274fd966277165ea856eec2221dede527edfaaa45fb0741cfe2fa0a7df9b1e201b4
+def SIGARGA 0x86fa420063b170c6b69472cbd3e94bccd68ba8abf23d11ab2c7ca2d5c5d54274fd966277165ea856eec2221dede527edfaaa45fb0741cfe2fa0a7df9b1e201b4
 
 ; the signed allow-anything delegate authorizes the spend
 eval (P2D (SYNPK) 0 (DELEGANY) 0 (SIGANYA))
 ; expect: 1
 
-; the same delegate and the same signature with a different solution:
-; the solution is not signed, only the delegate is
+; the same delegate and the same signature with different arguments:
+; the arguments are not signed, only the delegate is
 eval (P2D (SYNPK) 0 (DELEGANY) (q 1 2 3) (SIGANYA))
 ; expect: 1
 
@@ -123,23 +123,23 @@ eval (P2D (SYNPK) 0 (DELEGANY) (q 1 2 3) (SIGANYA))
 eval (P2D (SYNPK) 0 (DELEGCOV) 0 (SIGCOVA))
 ; expect: 1
 
-; the solution-reading delegate constrains what the spender supplies
-eval (P2D (SYNPK) 0 (DELEGSOL) 5 (SIGSOLA))
+; the argument-reading delegate constrains what the spender supplies
+eval (P2D (SYNPK) 0 (DELEGARG) 5 (SIGARGA))
 ; expect: 1
-eval (P2D (SYNPK) 0 (DELEGSOL) 6 (SIGSOLA))
+eval (P2D (SYNPK) 0 (DELEGARG) 6 (SIGARGA))
 ; expect: ERR(Exception: 0x7032643a2064656c656761746564207370656e64206e6f7420617574686f72697a6564)
 
 ; a substituted delegate does not match the signed tree hash
 eval (P2D (SYNPK) 0 (DELEGCOV) 0 (SIGANYA))
 ; expect: ERR(bip340_verify: invalid, non-empty signature)
 
-; the hidden puzzle path is refused, it is taproot's script path here
+; the hidden path is refused, it is taproot's script path here
 eval (P2D (SYNPK) (SYNPK) (DELEGANY) 0 (SIGANYA))
-; expect: ERR(Exception: 0x7032643a2068696464656e2070757a7a6c652070617468206e6f7420706f72746564)
+; expect: ERR(Exception: 0x7032643a2068696464656e2070617468206e6f7420706f72746564)
 
 ; the same two authorized spends through the compiled program, the
 ; environment is the compiler's argument tree
-; (((SYNPK . ORIGPK) . (DELEG . SOL)) . SIG)
+; (((SYNPK . ORIGPK) . (DELEG . ARGS)) . SIG)
 blleval @P2D (((0x7a9375ad6167ad54aa74c6348cc54d344cc5dc9487d847049d5eabb0fa03c8fb . 0) . ((0 . 1) . 0)) . 0x568cd2f0a4244d6d9cd7b684fc4c2052ce8027dcd0eac8970b2ada7b48c5c4da45be7ef4e046a9b792ffd5501575005e487b6bf758f5c72e2eb728305d15b7aa)
 ; expect: 1
 blleval @P2D (((0x7a9375ad6167ad54aa74c6348cc54d344cc5dc9487d847049d5eabb0fa03c8fb . 0) . ((14 (41 (0 . 3)) (0 . 2)) . 0)) . 0x965398b4b647c8210c2cfda1b0f7cbf1fac9c0d02c42a4fe761316e2a2db33eb98f122afa538e0999274a86491ba0462528c940601b5dde7ffe986b67c080aa3)

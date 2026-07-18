@@ -261,7 +261,7 @@ def gen_htlc():
 P2D_DELEGATES = {
     "DELEGANY": "0 . 1",
     "DELEGCOV": "14 (41 (0 . 3)) (0 . 2)",
-    "DELEGSOL": "14 1 (0 . 5)",
+    "DELEGARG": "14 1 (0 . 5)",
 }
 
 
@@ -302,7 +302,7 @@ def gen_p2d():
 
     def blleval_env(deleg, sig):
         """The compiled argument tree for a delegation spend:
-        (((SYNPK . ORIGPK) . (DELEG . SOL)) . SIG)."""
+        (((SYNPK . ORIGPK) . (DELEG . ARGS)) . SIG)."""
         return (f"(((0x{synpk.hex()} . 0) . "
                 f"(({P2D_DELEGATES[deleg]}) . 0)) . 0x{sig.hex()})")
 
@@ -323,7 +323,7 @@ def gen_p2d():
     sig_cov_a = p2d_sig_for(KEY_P2D_SYNTH, hashes["DELEGCOV"], tx_a)
     print(f"def SIGANYA 0x{sig_any_a.hex()}")
     print(f"def SIGCOVA 0x{sig_cov_a.hex()}")
-    print(f"def SIGSOLA 0x{p2d_sig_for(KEY_P2D_SYNTH, hashes['DELEGSOL'], tx_a).hex()}")
+    print(f"def SIGARGA 0x{p2d_sig_for(KEY_P2D_SYNTH, hashes['DELEGARG'], tx_a).hex()}")
     print()
     print("; compiled path spends for context A")
     print(f"blleval @P2D {blleval_env('DELEGANY', sig_any_a)}")
