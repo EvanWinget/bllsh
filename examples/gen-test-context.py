@@ -134,14 +134,15 @@ def emit_context(label, tx, utxo, script):
     emit_context2(label, tx, [utxo], script)
 
 
-def sig_for_at(priv, tx, utxos, script, idx):
+def sig_for_at(priv, tx, utxos, script, idx, leaf_ver=LEAF_VERSION_TAPSCRIPT):
     msg = TaprootSignatureHash(txTo=tx, spent_utxos=utxos, hash_type=0,
-                               input_index=idx, scriptpath=True, script=script)
+                               input_index=idx, scriptpath=True, script=script,
+                               leaf_ver=leaf_ver)
     return sign_schnorr(priv, msg)
 
 
-def sig_for(priv, tx, utxo, script):
-    return sig_for_at(priv, tx, [utxo], script, 0)
+def sig_for(priv, tx, utxo, script, leaf_ver=LEAF_VERSION_TAPSCRIPT):
+    return sig_for_at(priv, tx, [utxo], script, 0, leaf_ver)
 
 
 def wr(element):
@@ -518,9 +519,9 @@ def gen_commitment():
 
     with the pubkey quoted inside the committed program and the
     signature as the whole witness environment. The signature message
-    is the one the oracle's bip342_txmsg computes, which commits to
-    the leaf script under leaf version 0xc0 rather than the executing
-    leaf version, a recorded gap under review."""
+    commits to the leaf script under the executing leaf version taken
+    from the control block, so the 0xc2 contexts sign a message no
+    tapscript path could share."""
     pub = xonly(KEY_CMT_SIG)
     ipk = xonly(KEY_CMT_IPK)
     src = f"(bip340_verify (q . 0x{pub.hex()}) (bip342_txmsg) 1)"
@@ -536,7 +537,7 @@ def gen_commitment():
         return tx, utxo
 
     tx, utxo = spend_tx(b"")
-    sig = sig_for(KEY_CMT_SIG, tx, utxo, program)
+    sig = sig_for(KEY_CMT_SIG, tx, utxo, program, leaf_ver=LEAF_VERSION_BLL)
     tx, utxo = spend_tx(serialize_atom(sig))
 
     print(f"; program: {src}")

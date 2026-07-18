@@ -23,9 +23,11 @@ import spend
 from costs import Budget, budget_for_witness_size
 from element import ALLOCATOR, Atom, Element, Error, SExpr, SerDeser
 from testutil import case, report
-from verystable.core.key import TaggedHash, compute_xonly_pubkey, tweak_add_pubkey
+from verystable.core.key import (TaggedHash, compute_xonly_pubkey, sign_schnorr,
+                                 tweak_add_pubkey)
 from verystable.core.messages import (MAX_BLOCK_WEIGHT, COutPoint, CTransaction,
                                       CTxIn, CTxInWitness, CTxOut, ser_string)
+from verystable.core.script import LEAF_VERSION_TAPSCRIPT, TaprootSignatureHash
 
 # deterministic fixture key, obviously not for real use
 KEY_IPK = (7).to_bytes(32, "big")
@@ -284,6 +286,27 @@ def leaf_hash_binding():
     ok = str(r_good) == "valid" and str(r_bad) == "invalid: program result is nil"
     return ok, f"good {r_good}, bad {r_bad}"
 case("wiring/leaf-hash-binding", leaf_hash_binding)
+
+def sighash_names_executing_leaf():
+    """bip342_txmsg takes the leaf version from the control block,
+    so only a signature over the bll-versioned message validates and
+    a signature over the tapscript-versioned message of the same
+    script is refused."""
+    priv = (8).to_bytes(32, "big")
+    pub = compute_xonly_pubkey(priv)[0]
+    program = prog(f"(bip340_verify (q . 0x{pub.hex()}) (bip342_txmsg) 1)")
+    results = []
+    for leafver in (spend.LEAF_VERSION_BLL, LEAF_VERSION_TAPSCRIPT):
+        tx, spent = make_spend(program, b"\x80")
+        msg = TaprootSignatureHash(txTo=tx, spent_utxos=spent, hash_type=0,
+                                   input_index=0, scriptpath=True,
+                                   script=program, leaf_ver=leafver)
+        tx, spent = make_spend(program, ser_atom(sign_schnorr(priv, msg)))
+        results.append(str(spend.verify_spend(tx, 0, spent)))
+    ok = (results[0] == "valid"
+          and results[1] == "invalid: ERR(bip340_verify: invalid, non-empty signature)")
+    return ok, f"{results}"
+case("wiring/sighash-names-executing-leaf", sighash_names_executing_leaf)
 
 # ---- the budget ----
 

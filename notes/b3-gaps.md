@@ -20,9 +20,18 @@ close-out the same way as the earlier logs. Unit 1 recorded
    mode commits to the spent output's scriptPubKey and committing
    the same script under a different leaf version changes the output
    key. The fix is one line, passing the control block's leaf
-   version through, but it changes interpreter semantics and
-   invalidates every corpus signature generated before it, so it is
+   version through, but it changes interpreter semantics, so it was
    held for Evan's decision rather than fixed in the glue unit.
+   Decided 2026-07-18 (Evan): fixed. The opcode now takes the leaf
+   version from the control block, with tapscript's version standing
+   in when no script path witness is present, and the rule is pinned
+   by the sighash case in test-spend.py. Every earlier corpus
+   context commits its leaf under tapscript's version, where the old
+   and new messages coincide, so no existing signature changed. The
+   libbll port hashes the leaf under a hardcoded tapscript version
+   in txcontext.cpp and must adopt the same rule in the pin bump
+   that carries this change, with differential vectors expected to
+   change for contexts whose control blocks carry other versions.
 
 ## The budget
 

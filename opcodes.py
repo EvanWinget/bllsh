@@ -1161,11 +1161,23 @@ class op_bip342_txmsg(FixOpcode):
             return None
 
         annex = None
+        leafver = verystable.core.script.LEAF_VERSION_TAPSCRIPT
         if len(GLOBAL_TX.wit.vtxinwit) > 0:
             w = GLOBAL_TX.wit.vtxinwit[GLOBAL_TX_INPUT_IDX].scriptWitness.stack
             if len(w) > 0 and w[-1][0] == 0x50:
                 annex = w[-1]
-        r = verystable.core.script.TaprootSignatureHash(txTo=GLOBAL_TX, spent_utxos=GLOBAL_UTXOS, hash_type=sighash, input_index=GLOBAL_TX_INPUT_IDX, scriptpath=True, annex=annex, script=GLOBAL_TX_SCRIPT)
+            # The message names the executing leaf, so its version
+            # comes from the control block when the witness carries
+            # one: a signature must not authorize the same script
+            # under a different leaf version. Without a script path
+            # witness the tapscript version stands in, so contexts
+            # assembled by hand keep the BIP342 message.
+            n = len(w) - 1
+            if annex is not None:
+                n -= 1
+            if n >= 1 and len(w[n]) > 0:
+                leafver = w[n][0] & 0xFE
+        r = verystable.core.script.TaprootSignatureHash(txTo=GLOBAL_TX, spent_utxos=GLOBAL_UTXOS, hash_type=sighash, input_index=GLOBAL_TX_INPUT_IDX, scriptpath=True, annex=annex, script=GLOBAL_TX_SCRIPT, leaf_ver=leafver)
         return Atom(r)
 
 class op_tx(BinOpcode):
