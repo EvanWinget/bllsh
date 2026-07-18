@@ -102,18 +102,24 @@ p2_delegated_puzzle_or_hidden_puzzle) recorded 2026-07-18. Unit 2
 
 ## Proof parsing in bll
 
-9. **Witness supplied counters must be bounded before they recurse.**
-   The first draft let the parent input index drive the input
-   skipping recursion directly, and an out of range index burned the
-   evaluator's cost ceiling instead of refusing cleanly. The port now
-   bounds every witness supplied index by the count byte it walks
-   under, and parses revealed bytes only after they hash to a pinned
-   txid, so every cursor walk runs over verified data with a ceiling
-   below 128 steps. The consensus result of an overrun is the same
-   refusal, but a bounded refusal is free where an overrun spends the
-   whole budget, a cost griefing surface once budgets are real. SPEC
-   input: the no unbounded recursion rule extends to programs the
-   spec's examples teach people to write.
+9. **Witness supplied counters must be bounded before they recurse,
+   and re-encoded minimally before they count down.** The first draft
+   let the parent input index drive the input skipping recursion
+   directly, and an out of range index burned the evaluator's cost
+   ceiling instead of refusing cleanly. The second draft bounded the
+   value but not the encoding: a non-minimal zero like 0x00 passes a
+   numeric bound, yet a countdown that terminates on atom truthiness
+   never reaches the empty atom and spins past every negative value.
+   The port now bounds every witness supplied index by the count byte
+   it walks under, re-encodes it with `(+ X 0)` before any countdown,
+   and parses revealed bytes only after they hash to a pinned txid,
+   so every cursor walk runs over verified data with a ceiling below
+   128 steps. The consensus result of an overrun is the same refusal,
+   but a bounded refusal is free where an overrun spends the whole
+   budget, a cost griefing surface once budgets are real. SPEC input:
+   the no unbounded recursion rule extends to programs the spec's
+   examples teach people to write, and numeric bounds are not
+   encoding bounds.
 
 10. **Transaction parsing wants canonical form guards.** The port
     accepts only single byte counts and lengths below 0x80, raising
@@ -129,7 +135,10 @@ p2_delegated_puzzle_or_hidden_puzzle) recorded 2026-07-18. Unit 2
     open.** `(& amount 1)` over a raw 8 byte little endian amount
     yields an 8 byte atom that is truthy even when the value is zero,
     because only the empty atom is falsy. The port masks the low byte
-    and compares byte exactly. The `(+ X 0)` normalization idiom
+    and compares byte exactly. The empty atom needs its own guard on
+    top: the bitwise fold passes the other operand through when one
+    side is empty, so `(& nil 1)` is 1 and an unguarded parity test
+    calls a nonexistent amount odd. The `(+ X 0)` normalization idiom
     covers the integer cases. A signextend style opcode, already on
     the upstream TODO list, or a minimal integer coercion would make
     the natural spelling safe. Upstream discussion input.
@@ -189,5 +198,11 @@ p2_delegated_puzzle_or_hidden_puzzle) recorded 2026-07-18. Unit 2
     Chialisp .clib include. Compiled programs are unchanged, defs
     still compile into each program that uses them. The upstream
     test-taproot demo keeps its own copy, the fork leaves upstream
-    files untouched. The timelock helpers follow at the first B4
-    program that needs one.
+    files untouched, and the lib carries only defs with corpus users,
+    the leaf hashing chain stayed upstream since every corpus
+    reconstruction starts from the introspected leaf hash. The
+    boundary drawn: corpus generic blocks get the lib, family
+    internal duplication like the earmark defs shared by the two
+    flexmarks files stays inline until a third family member exists.
+    The timelock helpers follow at the first B4 program that needs
+    one.

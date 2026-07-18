@@ -3,11 +3,11 @@
 ;
 ; Source: puzzles/singleton_top_layer_v1_1.clsp from
 ; Chia-Network/chia_puzzles release 0.20.3
-; (d122456feeef55708d354a065623037bfa010714). A singleton is a chain
-; of coins with exactly one live representative. Each spend proves the
-; spent coin descends from a unique genesis outpoint and recreates
-; exactly one successor at the same script, or retires the chain. An
-; inner program authorizes each spend.
+; (d122456feeef55708d354a065623037bfa010714). A singleton is a
+; transaction chain with exactly one live UTXO at its tip. Each spend
+; proves the spent output descends from a unique genesis outpoint and
+; recreates exactly one successor at the same script, or retires the
+; chain. An inner program authorizes each spend.
 ;
 ; Block map from the source to this port:
 ;   SINGLETON_STRUCT (MOD_HASH LAUNCHER_ID . LAUNCHER_PUZZLE_HASH) ->
@@ -37,17 +37,19 @@
 ;      the argument tree before the witness commitment layout exists,
 ;      a known gap shared by the whole corpus. PROGHASH is partly
 ;      bound anyway: MYPROG requires it to equal the executing leaf
-;      (tx 6) and to reconstruct the spent scriptPubKey (tx 16).
+;      (tx 6). The further reconstruction of the spent scriptPubKey
+;      is consensus redundant under BIP341 and pins only the harness
+;      context's self consistency.
 ;   2. Conditions become direct tx assertions and the inner program
 ;      returns truthy instead of a condition list, following the p2d
 ;      port. The inner program here verifies a signature over the
 ;      whole transaction through bip342_txmsg.
 ;   3. The lineage proof reveals whole transactions instead of coin id
 ;      components. Outpoints do not carry scriptPubKeys, so proving
-;      the parent spent a singleton coin needs the grandparent
+;      the parent spent a singleton output needs the grandparent
 ;      transaction as well: PROOF must hash to my prevout txid
 ;      (tx 11), PROOF2 must hash to the txid in PROOF's input PIDX,
-;      and PROOF2's output named there must be an odd coin at my
+;      and PROOF2's output named there must be an odd output at my
 ;      scriptPubKey. The induction assumes this scriptPubKey is
 ;      spendable only through this leaf, that is a provably unusable
 ;      internal key and a single leaf tree, which the program cannot
@@ -57,9 +59,9 @@
 ;      needs the launcher to break a hash circularity and to announce
 ;      the created singleton. Here the genesis spend proves its parent
 ;      transaction consumed the committed GENESIS outpoint at input 0
-;      and that the spent coin sits at output 0, and the funder
+;      and that the spent output sits at index 0, and the funder
 ;      verifies the launch transaction they sign. No-double-spend of
-;      the GENESIS outpoint makes the genesis coin unique.
+;      the GENESIS outpoint makes the genesis output unique.
 ;   5. morph_condition's curried puzzle hash wrapping collapses to
 ;      scriptPubKey identity: the successor must pay to exactly the
 ;      spent scriptPubKey. The inner program is not committed before
@@ -73,7 +75,7 @@
 ;   7. The odd output scan is transaction wide where Chia scans one
 ;      coin's conditions. Stricter: every non-successor output must be
 ;      even. INSCAN closes the two-singleton collapse this opens, no
-;      other input may be an odd coin at my scriptPubKey.
+;      other input may be an odd output at my scriptPubKey.
 ;   8. Amounts and index fields are raw fixed width little endian, not
 ;      minimal integers. Parity reads the low byte through ODD8,
 ;      counters normalize through (+ X 0), and equality against
@@ -88,7 +90,7 @@
 ; All hex constants below were produced by
 ;   python3 examples/gen-test-context.py singleton
 ; The launch chain is genesis outpoint -> launch tx -> context A ->
-; context B, and contexts C through H respend context B's coin in
+; context B, and contexts C through H respend context B's successor in
 ; mutually exclusive hypotheticals.
 ;
 ; Run with
@@ -114,17 +116,26 @@ def INNER (q 38 (0 . 0x463b3d9f662621fb1b4be8fbbe2520125a216cdfc9dae3debcba4850c
 ; the singleton program
 
 ; parity of a raw 8 byte little endian amount. Non-empty zero atoms
-; are truthy, so the low byte is masked and compared byte exactly.
-def (ODD8 A) (= (& (substr A 0 1) 1) 1)
+; are truthy, so the low byte is masked and compared byte exactly,
+; and the empty atom is refused rather than misread as odd, the &
+; fold passes an operand through when the other side is empty.
+def (ODD8 A) (all (strlen A) (= (& (substr A 0 1) 1) 1))
 
-; the program hash argument must be the executing leaf, and the spent
-; scriptPubKey must commit to it. (tx 9) is (leafver . parity), the
+; the program hash argument must be the executing leaf. The
+; reconstruction of the spent scriptPubKey from (tx 9)'s parity bit,
+; the merkle path and the internal key is consensus redundant, BIP341
+; already verified the same equation to let this leaf run, but before
+; the commitment layout exists nothing else ties the harness context's
+; witness fields together, so it pins their self consistency here. The
 ; muladd inside TAPROOT raises on a mismatch.
-def (MYPROG PROGHASH) (all (= PROGHASH (tx 6)) (TAPROOT (t (tx 9)) (tx 6) (tx 8) (tx 7) (CHECKTAPSPK (tx 16))))
+def (MYPROG PROGHASH) (if (= PROGHASH (tx 6)) (TAPROOT (t (tx 9)) PROGHASH (tx 8) (tx 7) (CHECKTAPSPK (tx 16))))
 
 ; a single byte count or length read from revealed transaction bytes,
-; canonical form only: one byte, below 0x80, returned as a minimal int
-def (RD1 P POS) (if (<s (substr P POS (+ POS 1)) 0x80) (+ (substr P POS (+ POS 1)) 0) (x "singleton: varint"))
+; canonical form only: exactly one byte, below 0x80, returned as a
+; minimal int. An out of range read yields the empty atom from substr
+; and must raise, not parse as zero.
+def (RD1B B) (if (all (<s B 0x80) (strlen B)) (+ B 0) (x "singleton: varint"))
+def (RD1 P POS) (RD1B (substr P POS (+ POS 1)))
 
 ; cursor arithmetic over a serialized transaction without witness:
 ; an input is a 36 byte outpoint, a length prefixed scriptSig and a
@@ -134,11 +145,11 @@ def (SKIPINS P C N) (if N (SKIPINS P (+ C 41 (RD1 P (+ C 36))) (- N 1)) C)
 def (PREVOUTAT P C) (substr P C (+ C 36))
 def (OUTPOS P C N) (if N (OUTPOS P (+ C 9 (RD1 P (+ C 8))) (- N 1)) C)
 
-; the output at cursor C is an odd coin at my scriptPubKey
+; the output at cursor C is an odd output at my scriptPubKey
 def (SGLOUT P C) (all (= (substr P (+ C 9) (+ C 9 (RD1 P (+ C 8)))) (tx 16)) (ODD8 (substr P C (+ C 8))))
 
-; the grandparent's output named by outpoint OP is an odd coin at my
-; scriptPubKey. C is the position of P2's output count byte. The
+; the grandparent's output named by outpoint OP is an odd output at
+; my scriptPubKey. C is the position of P2's output count byte. The
 ; index bound keeps the OUTPOS recursion below the RD1 ceiling, a
 ; witness supplied counter must never drive an unbounded walk.
 def (ANCESTRY3 P2 OPN C) (if (all (< -1 OPN) (< OPN (RD1 P2 C))) (SGLOUT P2 (OUTPOS P2 (+ C 1) OPN)))
@@ -147,10 +158,12 @@ def (ANCESTRY3 P2 OPN C) (if (all (< -1 OPN) (< OPN (RD1 P2 C))) (SGLOUT P2 (OUT
 ; lazy if keeps every cursor walk on hash verified bytes
 def (ANCESTRY2 P2 OP) (if (= (hash256 P2) (substr OP 0 32)) (ANCESTRY3 P2 (+ (substr OP 32 36) 0) (SKIPINS P2 5 (RD1 P2 4))))
 
-; the parent's input J spent an odd coin at my scriptPubKey, proven
+; the parent's input J spent an odd output at my scriptPubKey, proven
 ; by revealing the grandparent transaction. J is witness supplied, so
-; it is bounded by the input count before it drives SKIPINS.
-def (ANCESTRY P P2 J) (if (all (< -1 J) (< J (RD1 P 4))) (ANCESTRY2 P2 (PREVOUTAT P (SKIPINS P 5 J))))
+; it is bounded by the input count and re-encoded minimally before it
+; drives SKIPINS, whose countdown ends on the empty atom: a
+; non-minimal zero would pass the numeric bound yet never count down.
+def (ANCESTRY P P2 J) (if (all (< -1 J) (< J (RD1 P 4))) (ANCESTRY2 P2 (PREVOUTAT P (SKIPINS P 5 (+ J 0)))))
 
 ; PROOF must be my actual parent transaction, then either the genesis
 ; claim, my parent consumed the GENESIS outpoint at input 0 and I am
@@ -167,7 +180,7 @@ def (ODDSCAN I N F) (if (= I N) F (ODDSCAN (+ I 1) N (if (ODD8 (tx (rc I 20))) (
 ; outputs is the retire mode
 def (CONT2 F) (if F (= (tx (rc (- F 1) 21)) (tx 16)) 1)
 
-; no other input may be an odd coin at my scriptPubKey, or two
+; no other input may be an odd output at my scriptPubKey, or two
 ; singleton chains would merge through one successor
 def (INSCAN I N) (if (= I N) 1 (all (any (= I (tx 4)) (notall (= (tx (rc I 16)) (tx 16)) (ODD8 (tx (rc I 15))))) (INSCAN (+ I 1) N)))
 
@@ -178,16 +191,22 @@ def (SINGLETON PROGHASH GENESIS INNER IARGS PROOF PROOF2 PIDX) (if (all (ODD8 (t
 ; -------------------------------------------------------------------
 ; context free pins
 
-; parity semantics on raw little endian amounts
+; parity semantics on raw little endian amounts, the empty atom is
+; refused rather than misread
 eval (ODD8 0x0100000000000000)
 ; expect: 1
 eval (ODD8 0x6200000000000000)
 ; expect: nil
+eval (ODD8 0)
+; expect: nil
 
-; the canonical form guard
+; the canonical form guard, an out of range read raises rather than
+; parsing as zero
 eval (RD1 0x7f 0)
 ; expect: 127
 eval (RD1 0x80 0)
+; expect: ERR(Exception: 0x73696e676c65746f6e3a20766172696e74)
+eval (RD1 0x7f 5)
 ; expect: ERR(Exception: 0x73696e676c65746f6e3a20766172696e74)
 
 ; the launch transaction, revealed by the genesis spend
@@ -211,7 +230,7 @@ def SIGA 0xbcd4800988e0037f155ed1132b25bf74ddf2b33f85cc7a6d8d4a2e003ce693fccfbdf
 def PROOFA 0x0200000001794b5325af3ead5758375b8616131ff1c04d44187d7aff85124c021836099f760000000000ffffffff02c1570100000000002251203e4514b95ef7d8a3a7e2dcaafe8f8343ee4af163b2be904a5ae60eb090ad94e4e803000000000000225120f16f804244e46e2a09232d4aff3b59976b98fac14328a2d1a32496b49998f24700000000
 
 ; the genesis spend, the launch transaction consumed the genesis
-; outpoint and this coin is its output 0
+; outpoint and this UTXO is its output 0
 eval (SINGLETON (PROGHASH) (GENESIS) (INNER) (SIGA) (PROOFGEN) 0 0)
 ; expect: 1
 
@@ -230,12 +249,12 @@ utxos c1570100000000002251203e4514b95ef7d8a3a7e2dcaafe8f8343ee4af163b2be904a5ae6
 def SIGB 0x94aa9f476855ae4c721d724cf52ddc7639228eb3e6c043784d0016172930910f5813cc09eac4e0ba3aa68284ea39601fe804c95bcfa87c634cc3993198eb3d59
 def PROOFB 0x0200000001a2ac6205b9bf42751e2c9f799230628cc96706b227b4052e6604cda31027ec280000000000ffffffff02f14f0100000000002251203e4514b95ef7d8a3a7e2dcaafe8f8343ee4af163b2be904a5ae60eb090ad94e4e803000000000000225120f16f804244e46e2a09232d4aff3b59976b98fac14328a2d1a32496b49998f24700000000
 
-; the ancestry spend, the parent transaction spent an odd coin at my
+; the ancestry spend, the parent transaction spent an odd output at my
 ; scriptPubKey, shown by the grandparent reveal
 eval (SINGLETON (PROGHASH) (GENESIS) (INNER) (SIGB) (PROOFA) (PROOFGEN) 0)
 ; expect: 1
 
-; a non-genesis coin cannot claim the genesis branch, the parent did
+; a non-genesis UTXO cannot claim the genesis branch, the parent did
 ; not consume the genesis outpoint
 eval (SINGLETON (PROGHASH) (GENESIS) (INNER) (SIGB) (PROOFA) 0 0)
 ; expect: ERR(Exception: 0x73696e676c65746f6e3a20696e76616c6964207370656e64)
@@ -248,6 +267,11 @@ eval (SINGLETON (PROGHASH) (GENESIS) (INNER) (SIGA) (PROOFA) (PROOFGEN) 0)
 ; can drive any parsing
 eval (SINGLETON (PROGHASH) (GENESIS) (INNER) (SIGB) (PROOFA) (PROOFGEN) 1)
 ; expect: ERR(Exception: 0x73696e676c65746f6e3a20696e76616c6964207370656e64)
+
+; a non-minimally encoded index is re-encoded before the countdown,
+; 0x00 is index zero, not an atom that never counts down
+eval (SINGLETON (PROGHASH) (GENESIS) (INNER) (SIGB) (PROOFA) (PROOFGEN) 0x00)
+; expect: 1
 
 ; a grandparent reveal that does not hash to the parent's prevout
 ; txid is never parsed
@@ -301,7 +325,7 @@ eval (SINGLETON (PROGHASH) (GENESIS) (INNER) (SIGE) (PROOFB) (PROOFA) 0)
 ; expect: ERR(Exception: 0x73696e676c65746f6e3a20696e76616c6964207370656e64)
 
 ; -------------------------------------------------------------------
-; context F: the spent coin's amount is even
+; context F: the spent output's amount is even
 tx 0200000000010178ea6344f2fbd331fd13446b12e03370f81e26362762fe5c3a2eab7a365d29ca0000000000ffffffff0221480100000000002251203e4514b95ef7d8a3a7e2dcaafe8f8343ee4af163b2be904a5ae60eb090ad94e4e803000000000000225120f16f804244e46e2a09232d4aff3b59976b98fac14328a2d1a32496b49998f2470213626c6c3a2073696e676c65746f6e2064656d6f21c02b22efda32491a9e0294339ca3da761f7d36cfc8814c1b29ca731921025ff69500000000
 tx_in_idx 0
 tx_script 626c6c3a2073696e676c65746f6e2064656d6f
@@ -309,7 +333,7 @@ utxos f04f0100000000002251203e4514b95ef7d8a3a7e2dcaafe8f8343ee4af163b2be904a5ae6
 
 def SIGF 0x43cb646824cdc1d4526ca32fcd9cfc9390dbfeb9740b0b3672cea8503488574d829504b79309517787385099099e17944d7e060ca3d0d3ffeddcecbd567cce56
 
-; an even coin is not a singleton
+; an even output is not a singleton
 eval (SINGLETON (PROGHASH) (GENESIS) (INNER) (SIGF) (PROOFB) (PROOFA) 0)
 ; expect: ERR(Exception: 0x73696e676c65746f6e3a20696e76616c6964207370656e64)
 
@@ -317,7 +341,7 @@ eval (SINGLETON (PROGHASH) (GENESIS) (INNER) (SIGF) (PROOFB) (PROOFA) 0)
 ; the look-alike launch transaction for context G
 def PROOFALT 0x0200000001202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f0000000000ffffffff0271110100000000002251203e4514b95ef7d8a3a7e2dcaafe8f8343ee4af163b2be904a5ae60eb090ad94e44671000000000000225120f16f804244e46e2a09232d4aff3b59976b98fac14328a2d1a32496b49998f24700000000
 
-; context G: a look-alike coin funded outside the chain
+; context G: a look-alike output funded outside the chain
 tx 020000000001018464dd548df0edb6c14f932f3502fd6e44fc3b5eb0f3d517654552f3d230c39f0000000000ffffffff02a1090100000000002251203e4514b95ef7d8a3a7e2dcaafe8f8343ee4af163b2be904a5ae60eb090ad94e4e803000000000000225120f16f804244e46e2a09232d4aff3b59976b98fac14328a2d1a32496b49998f2470213626c6c3a2073696e676c65746f6e2064656d6f21c02b22efda32491a9e0294339ca3da761f7d36cfc8814c1b29ca731921025ff69500000000
 tx_in_idx 0
 tx_script 626c6c3a2073696e676c65746f6e2064656d6f
@@ -325,7 +349,7 @@ utxos 71110100000000002251203e4514b95ef7d8a3a7e2dcaafe8f8343ee4af163b2be904a5ae6
 
 def SIGG 0x037a3cd1a78fcf1bb882180db4ef49a1666031fdd26a41de2a055dda6f8286af948ad4f351d8ba799ee105d20f3111dcc49afbf1cd6ece715c6c95d4564ce846
 
-; anyone can fund a coin at the singleton scriptPubKey, but its
+; anyone can fund an output at the singleton scriptPubKey, but its
 ; genesis claim names the wrong outpoint
 eval (SINGLETON (PROGHASH) (GENESIS) (INNER) (SIGG) (PROOFALT) 0 0)
 ; expect: ERR(Exception: 0x73696e676c65746f6e3a20696e76616c6964207370656e64)
@@ -336,7 +360,7 @@ eval (SINGLETON (PROGHASH) (GENESIS) (INNER) (SIGG) (PROOFALT) (PROOFGEN) 0)
 ; expect: ERR(Exception: 0x73696e676c65746f6e3a20696e76616c6964207370656e64)
 
 ; -------------------------------------------------------------------
-; context H: two singleton coins spent in one transaction
+; context H: two singleton outputs spent in one transaction
 tx 0200000000010278ea6344f2fbd331fd13446b12e03370f81e26362762fe5c3a2eab7a365d29ca0000000000ffffffff8464dd548df0edb6c14f932f3502fd6e44fc3b5eb0f3d517654552f3d230c39f0000000000ffffffff01795d0200000000002251203e4514b95ef7d8a3a7e2dcaafe8f8343ee4af163b2be904a5ae60eb090ad94e40213626c6c3a2073696e676c65746f6e2064656d6f21c02b22efda32491a9e0294339ca3da761f7d36cfc8814c1b29ca731921025ff6950213626c6c3a2073696e676c65746f6e2064656d6f21c02b22efda32491a9e0294339ca3da761f7d36cfc8814c1b29ca731921025ff69500000000
 tx_in_idx 0
 tx_script 626c6c3a2073696e676c65746f6e2064656d6f

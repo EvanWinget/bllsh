@@ -86,24 +86,10 @@ def p2tr_raw(pub):
     return bytes([0x51, 0x20]) + pub
 
 
-def make_tx(spk, outputs, nsequence, nlocktime, script, control_block,
-            nversion=2, prev_txid=FUNDING_TXID, prev_value=FUNDING_VALUE):
-    utxo = CTxOut(prev_value, spk)
-    tx = CTransaction()
-    tx.nVersion = nversion
-    tx.nLockTime = nlocktime
-    tx.vin = [CTxIn(COutPoint(prev_txid, 0), b"", nsequence)]
-    tx.vout = [CTxOut(value, out_spk) for value, out_spk in outputs]
-    wit = CTxInWitness()
-    wit.scriptWitness.stack = [script, control_block]
-    tx.wit.vtxinwit = [wit]
-    return tx, utxo
-
-
 def make_tx2(prevs, outputs, script, control_block,
              nsequence=0xffffffff, nlocktime=0, nversion=2):
-    """A multi input transaction, every input spending output 0 of its
-    prev txid through the same script path."""
+    """A transaction spending output 0 of each prev txid through the
+    same script path. The single input make_tx delegates here."""
     tx = CTransaction()
     tx.nVersion = nversion
     tx.nLockTime = nlocktime
@@ -118,13 +104,11 @@ def make_tx2(prevs, outputs, script, control_block,
     return tx, utxos
 
 
-def emit_context(label, tx, utxo, script):
-    print(f"; {label}")
-    print(f"tx {tx.serialize_with_witness().hex()}")
-    print("tx_in_idx 0")
-    print(f"tx_script {script.hex()}")
-    print(f"utxos {utxo.serialize().hex()}")
-    print()
+def make_tx(spk, outputs, nsequence, nlocktime, script, control_block,
+            nversion=2, prev_txid=FUNDING_TXID, prev_value=FUNDING_VALUE):
+    tx, utxos = make_tx2([(prev_txid, prev_value, spk)], outputs, script,
+                         control_block, nsequence, nlocktime, nversion)
+    return tx, utxos[0]
 
 
 def emit_context2(label, tx, utxos, script):
@@ -136,16 +120,18 @@ def emit_context2(label, tx, utxos, script):
     print()
 
 
-def sig_for(priv, tx, utxo, script):
-    msg = TaprootSignatureHash(txTo=tx, spent_utxos=[utxo], hash_type=0,
-                               input_index=0, scriptpath=True, script=script)
-    return sign_schnorr(priv, msg)
+def emit_context(label, tx, utxo, script):
+    emit_context2(label, tx, [utxo], script)
 
 
 def sig_for_at(priv, tx, utxos, script, idx):
     msg = TaprootSignatureHash(txTo=tx, spent_utxos=utxos, hash_type=0,
                                input_index=idx, scriptpath=True, script=script)
     return sign_schnorr(priv, msg)
+
+
+def sig_for(priv, tx, utxo, script):
+    return sig_for_at(priv, tx, [utxo], script, 0)
 
 
 def wr(element):
@@ -404,7 +390,7 @@ def gen_singleton():
     print()
 
     # the launch transaction spends the genesis outpoint and creates
-    # the first singleton coin at output 0, its witness is irrelevant
+    # the first singleton output at index 0, its witness is irrelevant
     fund, _ = make_tx(dest, [(90001, spk), (8998, dest)], 0xffffffff, 0,
                       script, cb)
     fund.rehash()
@@ -452,7 +438,7 @@ def gen_singleton():
 
     txf, utxof = make_tx(spk, [(84001, spk), (1000, dest)], 0xffffffff, 0,
                          script, cb, prev_txid=txb.sha256, prev_value=86000)
-    emit_context("context F: the spent coin's amount is even", txf, utxof, script)
+    emit_context("context F: the spent output's amount is even", txf, utxof, script)
     print(f"def SIGF 0x{sig_for(KEY_SGL_INNER, txf, utxof, script).hex()}")
     print()
 
@@ -465,13 +451,13 @@ def gen_singleton():
     print()
     txg, utxog = make_tx(spk, [(68001, spk), (1000, dest)], 0xffffffff, 0,
                          script, cb, prev_txid=fund_alt.sha256, prev_value=70001)
-    emit_context("context G: a look-alike coin funded outside the chain", txg, utxog, script)
+    emit_context("context G: a look-alike output funded outside the chain", txg, utxog, script)
     print(f"def SIGG 0x{sig_for(KEY_SGL_INNER, txg, utxog, script).hex()}")
     print()
 
     txh, utxosh = make_tx2([(txb.sha256, 86001, spk), (fund_alt.sha256, 70001, spk)],
                            [(155001, spk)], script, cb)
-    emit_context2("context H: two singleton coins spent in one transaction", txh, utxosh, script)
+    emit_context2("context H: two singleton outputs spent in one transaction", txh, utxosh, script)
     print(f"def SIGH 0x{sig_for_at(KEY_SGL_INNER, txh, utxosh, script, 0).hex()}")
 
 
