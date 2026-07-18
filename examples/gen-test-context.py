@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Generate deterministic test contexts for the vault and flexmarks examples.
+"""Generate deterministic test contexts for the corpus examples.
 
-Every hex constant in examples/test-vault, examples/test-flexmarks and
-examples/test-flexmarks-htlc is produced by this script, so the examples
-can be regenerated and audited. Run from the repository root:
+Every hex constant in examples/test-vault, examples/test-flexmarks,
+examples/test-flexmarks-htlc and examples/test-p2-delegated is produced
+by this script, so the examples can be regenerated and audited. Run from
+the repository root:
 
     python3 examples/gen-test-context.py vault
     python3 examples/gen-test-context.py flexmarks
     python3 examples/gen-test-context.py htlc
+    python3 examples/gen-test-context.py p2d
 
 The output is a block of REPL commands (tx, tx_in_idx, tx_script, utxos)
 followed by def lines for the signatures and other witness data, ready to
@@ -19,11 +21,12 @@ so any bytes work as long as the control block, the utxo scriptPubKey
 and tx_script agree with each other.
 """
 
+import struct
 import sys
 
 sys.path.insert(0, ".")
 
-from element import Atom, Cons, SerDeser
+from element import Atom, Cons, SExpr, SerDeser
 from verystable.core import messages
 from verystable.core.key import TaggedHash, compute_xonly_pubkey, sign_schnorr, tweak_add_pubkey
 from verystable.core.messages import COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, ser_string
@@ -39,8 +42,13 @@ KEY_MEMBER_2 = (22).to_bytes(32, "big")
 KEY_HTLC_IPK = (31).to_bytes(32, "big")
 KEY_HTLC_RECV = (32).to_bytes(32, "big")
 KEY_HTLC_SEND = (33).to_bytes(32, "big")
+KEY_P2D_SYNTH = (41).to_bytes(32, "big")
+KEY_P2D_IPK = (42).to_bytes(32, "big")
+KEY_P2D_DEST1 = (43).to_bytes(32, "big")
+KEY_P2D_DEST2 = (44).to_bytes(32, "big")
 
 FUNDING_TXID = int.from_bytes(bytes(range(32)), "little")
+FUNDING_TXID_ALT = int.from_bytes(bytes(range(32, 64)), "little")
 FUNDING_VALUE = 100000
 
 
@@ -248,10 +256,76 @@ def gen_htlc():
     print(f"def SIGTIMETYPED 0x{sig_for(KEY_HTLC_SEND, timetyped, utxo, script).hex()}")
 
 
+DELEG_ANY = "(0 . 1)"
+DELEG_COV = "(14 (41 (0 . 3)) (0 . 2))"
+DELEG_SOL = "(14 1 (0 . 5))"
+
+
+def sha256tree(el):
+    """The p2d example's SHA256TREE def, computed in Python: leaves
+    are hashed under a 1 prefix and pairs under a 2 prefix."""
+    if el.is_cons():
+        return messages.sha256(b"\x02" + sha256tree(el.val1) + sha256tree(el.val2))
+    return messages.sha256(b"\x01" + el.val2)
+
+
+def deleg_hash(text):
+    el = SExpr.parse(text)
+    r = sha256tree(el)
+    el.deref()
+    return r
+
+
+def p2d_sig_for(priv, deleg_text, tx):
+    """The AGG_SIG_ME analogue: a signature over the delegate's tree
+    hash bound to the spent outpoint, matching the example's
+    (sha256 (SHA256TREE DELEG) (tx 11) (tx 12)). The transaction's
+    outputs are deliberately not covered, only the delegate is."""
+    prevout = tx.vin[0].prevout
+    msg = messages.sha256(deleg_hash(deleg_text)
+                          + messages.ser_uint256(prevout.hash)
+                          + struct.pack("<I", prevout.n))
+    return sign_schnorr(priv, msg)
+
+
+def gen_p2d():
+    script = b"bll: p2d demo"
+    ipk = xonly(KEY_P2D_IPK)
+    spk, parity = taproot_spk(ipk, tapleaf_hash(script), [])
+    cb = bytes([LEAF_VERSION_TAPSCRIPT | parity]) + ipk
+
+    print(f"; synthetic pubkey {xonly(KEY_P2D_SYNTH).hex()}")
+    print(f"; sha256tree DELEGANY {deleg_hash(DELEG_ANY).hex()}")
+    print(f"; sha256tree DELEGCOV {deleg_hash(DELEG_COV).hex()}")
+    print(f"; sha256tree DELEGSOL {deleg_hash(DELEG_SOL).hex()}")
+    print()
+    print(f"def SYNPK 0x{xonly(KEY_P2D_SYNTH).hex()}")
+    print("def DELEGANY (q 0 . 1)")
+    print("def DELEGCOV (q 14 (41 (0 . 3)) (0 . 2))")
+    print("def DELEGSOL (q 14 1 (0 . 5))")
+    print()
+
+    outputs_a = [(60000, p2tr_raw(xonly(KEY_P2D_DEST1))),
+                 (39000, p2tr_raw(xonly(KEY_P2D_DEST2)))]
+    tx_a, utxo_a = make_tx(spk, outputs_a, 0xffffffff, 0, script, cb)
+    emit_context("context A: two outputs, first funding outpoint", tx_a, utxo_a, script)
+    print(f"def SIGANYA 0x{p2d_sig_for(KEY_P2D_SYNTH, DELEG_ANY, tx_a).hex()}")
+    print(f"def SIGCOVA 0x{p2d_sig_for(KEY_P2D_SYNTH, DELEG_COV, tx_a).hex()}")
+    print(f"def SIGSOLA 0x{p2d_sig_for(KEY_P2D_SYNTH, DELEG_SOL, tx_a).hex()}")
+    print()
+
+    outputs_b = [(99000, p2tr_raw(xonly(KEY_P2D_DEST1)))]
+    tx_b, utxo_b = make_tx(spk, outputs_b, 0xffffffff, 0, script, cb,
+                           prev_txid=FUNDING_TXID_ALT)
+    emit_context("context B: one output, different funding outpoint", tx_b, utxo_b, script)
+    print(f"def SIGCOVB 0x{p2d_sig_for(KEY_P2D_SYNTH, DELEG_COV, tx_b).hex()}")
+
+
 def main():
-    targets = {"vault": gen_vault, "flexmarks": gen_flexmarks, "htlc": gen_htlc}
+    targets = {"vault": gen_vault, "flexmarks": gen_flexmarks, "htlc": gen_htlc,
+               "p2d": gen_p2d}
     if len(sys.argv) != 2 or sys.argv[1] not in targets:
-        print(f"usage: {sys.argv[0]} {{vault|flexmarks|htlc}}", file=sys.stderr)
+        print(f"usage: {sys.argv[0]} {{vault|flexmarks|htlc|p2d}}", file=sys.stderr)
         return 1
     targets[sys.argv[1]]()
     return 0
