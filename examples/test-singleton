@@ -50,18 +50,27 @@
 ;      transaction as well: PROOF must hash to my prevout txid
 ;      (tx 11), PROOF2 must hash to the txid in PROOF's input PIDX,
 ;      and PROOF2's output named there must be an odd output at my
-;      scriptPubKey. The induction assumes this scriptPubKey is
+;      scriptPubKey. The induction rests on two assumptions the
+;      program cannot check from inside. First, this scriptPubKey is
 ;      spendable only through this leaf, that is a provably unusable
-;      internal key and a single leaf tree, which the program cannot
-;      check from inside. These test contexts use an ordinary internal
-;      key.
+;      internal key and a single leaf tree, and these test contexts
+;      use an ordinary internal key. Second, GENESIS itself is
+;      committed: it rides the unbound argument tree of deviation 1,
+;      so until the witness commitment layout binds it, every spend
+;      picks its own GENESIS and a look-alike chain can validate
+;      against a genesis outpoint of its own choosing. Exclusion of
+;      look-alikes is therefore conditional on the commitment layout,
+;      where Chia gets it unconditionally by currying LAUNCHER_ID
+;      into the puzzle hash.
 ;   4. The launcher puzzle and its announcement are not ported. Chia
 ;      needs the launcher to break a hash circularity and to announce
 ;      the created singleton. Here the genesis spend proves its parent
 ;      transaction consumed the committed GENESIS outpoint at input 0
 ;      and that the spent output sits at index 0, and the funder
 ;      verifies the launch transaction they sign. No-double-spend of
-;      the GENESIS outpoint makes the genesis output unique.
+;      the GENESIS outpoint makes the genesis output unique for a
+;      given genesis outpoint, subject to deviation 3's caveat that
+;      GENESIS is uncommitted before the witness commitment layout.
 ;   5. morph_condition's curried puzzle hash wrapping collapses to
 ;      scriptPubKey identity: the successor must pay to exactly the
 ;      spent scriptPubKey. The inner program is not committed before
@@ -74,8 +83,13 @@
 ;      signature, as this one does through bip342_txmsg.
 ;   7. The odd output scan is transaction wide where Chia scans one
 ;      coin's conditions. Stricter: every non-successor output must be
-;      even. INSCAN closes the two-singleton collapse this opens, no
-;      other input may be an odd output at my scriptPubKey.
+;      even, two singletons with different scriptPubKeys cannot share
+;      a transaction since each demands the unique odd output recommit
+;      to its own script, and any co-resident protocol needing an odd
+;      output is shut out. Chia allows all of these through per-coin
+;      condition scoping. INSCAN closes the two-singleton collapse
+;      this scoping change opens, no other input may be an odd output
+;      at my scriptPubKey.
 ;   8. Amounts and index fields are raw fixed width little endian, not
 ;      minimal integers. Parity reads the low byte through ODD8,
 ;      counters normalize through (+ X 0), and equality against
@@ -90,8 +104,9 @@
 ; All hex constants below were produced by
 ;   python3 examples/gen-test-context.py singleton
 ; The launch chain is genesis outpoint -> launch tx -> context A ->
-; context B, and contexts C through H respend context B's successor in
-; mutually exclusive hypotheticals.
+; context B, contexts C through I respend context B's successor in
+; mutually exclusive hypotheticals, and context J spends a launch
+; variant with two odd outputs.
 ;
 ; Run with
 ;   python3 examples/run-examples.py examples/test-singleton
@@ -349,8 +364,10 @@ utxos 71110100000000002251203e4514b95ef7d8a3a7e2dcaafe8f8343ee4af163b2be904a5ae6
 
 def SIGG 0x037a3cd1a78fcf1bb882180db4ef49a1666031fdd26a41de2a055dda6f8286af948ad4f351d8ba799ee105d20f3111dcc49afbf1cd6ece715c6c95d4564ce846
 
-; anyone can fund an output at the singleton scriptPubKey, but its
-; genesis claim names the wrong outpoint
+; anyone can fund an output at the singleton scriptPubKey, and its
+; claim against the committed genesis outpoint names the wrong one.
+; This refusal binds only once the commitment layout commits GENESIS,
+; an unbound look-alike could claim its own outpoint, deviation 3.
 eval (SINGLETON (PROGHASH) (GENESIS) (INNER) (SIGG) (PROOFALT) 0 0)
 ; expect: ERR(Exception: 0x73696e676c65746f6e3a20696e76616c6964207370656e64)
 
@@ -370,6 +387,38 @@ def SIGH 0x8ad0e15167eae8cd5618c2d175685e1a0d0141f6459c9428a563be0d0b33d0cdc3f45
 
 ; two chains cannot merge through one successor
 eval (SINGLETON (PROGHASH) (GENESIS) (INNER) (SIGH) (PROOFB) (PROOFA) 0)
+; expect: ERR(Exception: 0x73696e676c65746f6e3a20696e76616c6964207370656e64)
+
+; -------------------------------------------------------------------
+; context I: the successor sits at a nonzero output index
+tx 0200000000010178ea6344f2fbd331fd13446b12e03370f81e26362762fe5c3a2eab7a365d29ca0000000000ffffffff02e803000000000000225120f16f804244e46e2a09232d4aff3b59976b98fac14328a2d1a32496b49998f24721480100000000002251203e4514b95ef7d8a3a7e2dcaafe8f8343ee4af163b2be904a5ae60eb090ad94e40213626c6c3a2073696e676c65746f6e2064656d6f21c02b22efda32491a9e0294339ca3da761f7d36cfc8814c1b29ca731921025ff69500000000
+tx_in_idx 0
+tx_script 626c6c3a2073696e676c65746f6e2064656d6f
+utxos f14f0100000000002251203e4514b95ef7d8a3a7e2dcaafe8f8343ee4af163b2be904a5ae60eb090ad94e4
+
+def SIGI 0x57256c1d02efd48066a35ed70fc2a9af19f987b62fc305d26d75ecbd52784dfad90897c8b92744e90d0fb6c7d32ffe6e6fd4d25937746e0b26b4482f74fbfe13
+
+; the successor index is found by the scan, not assumed to be zero,
+; pinning ODDSCAN's index-plus-one encoding at an index above zero
+eval (SINGLETON (PROGHASH) (GENESIS) (INNER) (SIGI) (PROOFB) (PROOFA) 0)
+; expect: 1
+
+; -------------------------------------------------------------------
+; the two odd output launch variant for context J
+def PROOFGEN2 0x0200000001000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000ffffffff02c9af0000000000002251203e4514b95ef7d8a3a7e2dcaafe8f8343ee4af163b2be904a5ae60eb090ad94e4dfab0000000000002251203e4514b95ef7d8a3a7e2dcaafe8f8343ee4af163b2be904a5ae60eb090ad94e400000000
+
+; context J: a genesis claim from output index 1
+tx 0200000000010173e36a2b05f700c896394468bd86dd06fcc99085c6b471481e6ce2e4c4f7cb200100000000ffffffff01f7a70000000000002251203e4514b95ef7d8a3a7e2dcaafe8f8343ee4af163b2be904a5ae60eb090ad94e40213626c6c3a2073696e676c65746f6e2064656d6f21c02b22efda32491a9e0294339ca3da761f7d36cfc8814c1b29ca731921025ff69500000000
+tx_in_idx 0
+tx_script 626c6c3a2073696e676c65746f6e2064656d6f
+utxos dfab0000000000002251203e4514b95ef7d8a3a7e2dcaafe8f8343ee4af163b2be904a5ae60eb090ad94e4
+
+def SIGJ 0x2ae9f7c7a48f5f8c03e4f8d4920845e782dbbaa97994def149d079df34ab50c560ab4daff613d64391faf6c226d630729d109d2dae0d79a9d4085d6fa45eaaf0
+
+; the launch variant spent the genesis outpoint and this output is
+; odd at the singleton scriptPubKey, but only output 0 may claim the
+; genesis branch, so the (tx 12) index rule is the check that refuses
+eval (SINGLETON (PROGHASH) (GENESIS) (INNER) (SIGJ) (PROOFGEN2) 0 0)
 ; expect: ERR(Exception: 0x73696e676c65746f6e3a20696e76616c6964207370656e64)
 
 ; -------------------------------------------------------------------

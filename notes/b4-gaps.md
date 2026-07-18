@@ -6,7 +6,7 @@ release 0.20.3. Each item is input either for Track B design work,
 for SPEC.md, or for upstream discussion, and the log is routed at B4
 close-out in the same way as part 1. Unit 1 (the delegation half of
 p2_delegated_puzzle_or_hidden_puzzle) recorded 2026-07-18. Unit 2
-(singleton_top_layer_v1_1, items 7 through 16) recorded 2026-07-18.
+(singleton_top_layer_v1_1, items 7 through 17) recorded 2026-07-18.
 
 ## Language and opcode surface
 
@@ -157,14 +157,22 @@ p2_delegated_puzzle_or_hidden_puzzle) recorded 2026-07-18. Unit 2
     exclusivity, the layout should give programs a way to know or
     force it.
 
-13. **Nothing commits the inner program before the witness commitment
-    layout exists.** The singleton takes its own leaf hash as an
-    explicit argument and binds it to `(tx 6)` and the spent
-    scriptPubKey, but INNER rides the unbound argument tree, so
-    inner transitions in Chia's morph sense have no meaning yet. The
-    port pins successor identity to the whole scriptPubKey instead.
-    Reinforces the program hash argument decision and its revisit
-    point at the commitment layout draft.
+13. **Nothing commits the argument tree, and for the singleton that
+    means neither INNER nor GENESIS.** The singleton takes its own
+    leaf hash as an explicit argument and binds it to `(tx 6)`, but
+    INNER and GENESIS ride the unbound argument tree. For INNER this
+    means inner transitions in Chia's morph sense have no meaning
+    yet, and the port pins successor identity to the whole
+    scriptPubKey instead. For GENESIS the consequence is sharper:
+    every spend picks its own genesis outpoint, so a look-alike
+    output at the singleton scriptPubKey validates against a genesis
+    of its own choosing, and the exclusion of look-alike chains that
+    the parent and grandparent reveal earns is conditional on the
+    commitment layout binding GENESIS. Chia gets the unconditional
+    version by currying LAUNCHER_ID into the puzzle hash. A committed
+    program in the leaf with its constants quoted inside restores the
+    same property by construction. This is the strongest single input
+    the corpus has produced for the commitment layout design.
 
 ## The source puzzle itself
 
@@ -185,9 +193,23 @@ p2_delegated_puzzle_or_hidden_puzzle) recorded 2026-07-18. Unit 2
     singleton to the funding spend. Here the genesis outpoint plays
     the launcher id, the genesis spend proves the launch transaction
     consumed it at input 0, and no-double-spend makes the genesis
-    coin unique. The funder verifies the launch transaction they
-    sign, which is the announcement's job done by the signer.
-    Recorded structural deviation.
+    output unique for a given genesis outpoint, subject to item 13's
+    caveat that GENESIS itself is uncommitted before the commitment
+    layout. The funder verifies the launch transaction they sign,
+    which is the announcement's job done by the signer. Recorded
+    structural deviation.
+
+17. **The transaction wide odd scan is a composition constraint.**
+    Chia scopes the exactly-one-odd rule to one coin's emitted
+    conditions, so several singletons and odd-amount bystanders
+    coexist in one spend bundle. The port's scan sees the whole
+    transaction: every non-successor output must be even, two
+    singletons with different scriptPubKeys cannot share a
+    transaction, and any co-resident protocol needing an odd output
+    is shut out. Input for the offer flow unit, which composes
+    multiple parties' outputs in one transaction and must either
+    live inside the even-amount constraint or motivate a scoping
+    mechanism.
 
 ## The framework, unit 2
 

@@ -88,14 +88,15 @@ def p2tr_raw(pub):
 
 def make_tx2(prevs, outputs, script, control_block,
              nsequence=0xffffffff, nlocktime=0, nversion=2):
-    """A transaction spending output 0 of each prev txid through the
-    same script path. The single input make_tx delegates here."""
+    """A transaction spending each (prev_txid, prev_vout, prev_value,
+    prev_spk) through the same script path. The single input make_tx
+    delegates here."""
     tx = CTransaction()
     tx.nVersion = nversion
     tx.nLockTime = nlocktime
     utxos = []
-    for prev_txid, prev_value, prev_spk in prevs:
-        tx.vin.append(CTxIn(COutPoint(prev_txid, 0), b"", nsequence))
+    for prev_txid, prev_vout, prev_value, prev_spk in prevs:
+        tx.vin.append(CTxIn(COutPoint(prev_txid, prev_vout), b"", nsequence))
         wit = CTxInWitness()
         wit.scriptWitness.stack = [script, control_block]
         tx.wit.vtxinwit.append(wit)
@@ -105,9 +106,10 @@ def make_tx2(prevs, outputs, script, control_block,
 
 
 def make_tx(spk, outputs, nsequence, nlocktime, script, control_block,
-            nversion=2, prev_txid=FUNDING_TXID, prev_value=FUNDING_VALUE):
-    tx, utxos = make_tx2([(prev_txid, prev_value, spk)], outputs, script,
-                         control_block, nsequence, nlocktime, nversion)
+            nversion=2, prev_txid=FUNDING_TXID, prev_value=FUNDING_VALUE,
+            prev_vout=0):
+    tx, utxos = make_tx2([(prev_txid, prev_vout, prev_value, spk)], outputs,
+                         script, control_block, nsequence, nlocktime, nversion)
     return tx, utxos[0]
 
 
@@ -455,10 +457,30 @@ def gen_singleton():
     print(f"def SIGG 0x{sig_for(KEY_SGL_INNER, txg, utxog, script).hex()}")
     print()
 
-    txh, utxosh = make_tx2([(txb.sha256, 86001, spk), (fund_alt.sha256, 70001, spk)],
+    txh, utxosh = make_tx2([(txb.sha256, 0, 86001, spk), (fund_alt.sha256, 0, 70001, spk)],
                            [(155001, spk)], script, cb)
     emit_context2("context H: two singleton outputs spent in one transaction", txh, utxosh, script)
     print(f"def SIGH 0x{sig_for_at(KEY_SGL_INNER, txh, utxosh, script, 0).hex()}")
+    print()
+
+    txi, utxoi = make_tx(spk, [(1000, dest), (84001, spk)], 0xffffffff, 0,
+                         script, cb, prev_txid=txb.sha256, prev_value=86001)
+    emit_context("context I: the successor sits at a nonzero output index", txi, utxoi, script)
+    print(f"def SIGI 0x{sig_for(KEY_SGL_INNER, txi, utxoi, script).hex()}")
+    print()
+
+    # a launch variant with two odd outputs at the singleton
+    # scriptPubKey, output 1 may not claim the genesis branch
+    fund2, _ = make_tx(dest, [(45001, spk), (43999, spk)], 0xffffffff, 0,
+                       script, cb)
+    fund2.rehash()
+    print("; the two odd output launch variant for context J")
+    print(f"def PROOFGEN2 0x{proof(fund2).hex()}")
+    print()
+    txj, utxoj = make_tx(spk, [(42999, spk)], 0xffffffff, 0, script, cb,
+                         prev_txid=fund2.sha256, prev_value=43999, prev_vout=1)
+    emit_context("context J: a genesis claim from output index 1", txj, utxoj, script)
+    print(f"def SIGJ 0x{sig_for(KEY_SGL_INNER, txj, utxoj, script).hex()}")
 
 
 def main():
