@@ -2,14 +2,15 @@
 """Generate deterministic test contexts for the corpus examples.
 
 Every hex constant in examples/test-vault, examples/test-flexmarks,
-examples/test-flexmarks-htlc and examples/test-p2-delegated is produced
-by this script, so the examples can be regenerated and audited. Run from
-the repository root:
+examples/test-flexmarks-htlc, examples/test-p2-delegated and
+examples/test-singleton is produced by this script, so the examples can
+be regenerated and audited. Run from the repository root:
 
     python3 examples/gen-test-context.py vault
     python3 examples/gen-test-context.py flexmarks
     python3 examples/gen-test-context.py htlc
     python3 examples/gen-test-context.py p2d
+    python3 examples/gen-test-context.py singleton
 
 The output is a block of REPL commands (tx, tx_in_idx, tx_script, utxos)
 followed by def lines for the signatures and other witness data, ready to
@@ -46,6 +47,9 @@ KEY_P2D_SYNTH = (41).to_bytes(32, "big")
 KEY_P2D_IPK = (42).to_bytes(32, "big")
 KEY_P2D_DEST1 = (43).to_bytes(32, "big")
 KEY_P2D_DEST2 = (44).to_bytes(32, "big")
+KEY_SGL_INNER = (51).to_bytes(32, "big")
+KEY_SGL_IPK = (52).to_bytes(32, "big")
+KEY_SGL_DEST = (53).to_bytes(32, "big")
 
 FUNDING_TXID = int.from_bytes(bytes(range(32)), "little")
 FUNDING_TXID_ALT = int.from_bytes(bytes(range(32, 64)), "little")
@@ -82,33 +86,54 @@ def p2tr_raw(pub):
     return bytes([0x51, 0x20]) + pub
 
 
-def make_tx(spk, outputs, nsequence, nlocktime, script, control_block,
-            nversion=2, prev_txid=FUNDING_TXID, prev_value=FUNDING_VALUE):
-    utxo = CTxOut(prev_value, spk)
+def make_tx2(prevs, outputs, script, control_block,
+             nsequence=0xffffffff, nlocktime=0, nversion=2):
+    """A transaction spending each (prev_txid, prev_vout, prev_value,
+    prev_spk) through the same script path. The single input make_tx
+    delegates here."""
     tx = CTransaction()
     tx.nVersion = nversion
     tx.nLockTime = nlocktime
-    tx.vin = [CTxIn(COutPoint(prev_txid, 0), b"", nsequence)]
+    utxos = []
+    for prev_txid, prev_vout, prev_value, prev_spk in prevs:
+        tx.vin.append(CTxIn(COutPoint(prev_txid, prev_vout), b"", nsequence))
+        wit = CTxInWitness()
+        wit.scriptWitness.stack = [script, control_block]
+        tx.wit.vtxinwit.append(wit)
+        utxos.append(CTxOut(prev_value, prev_spk))
     tx.vout = [CTxOut(value, out_spk) for value, out_spk in outputs]
-    wit = CTxInWitness()
-    wit.scriptWitness.stack = [script, control_block]
-    tx.wit.vtxinwit = [wit]
-    return tx, utxo
+    return tx, utxos
 
 
-def emit_context(label, tx, utxo, script):
+def make_tx(spk, outputs, nsequence, nlocktime, script, control_block,
+            nversion=2, prev_txid=FUNDING_TXID, prev_value=FUNDING_VALUE,
+            prev_vout=0):
+    tx, utxos = make_tx2([(prev_txid, prev_vout, prev_value, spk)], outputs,
+                         script, control_block, nsequence, nlocktime, nversion)
+    return tx, utxos[0]
+
+
+def emit_context2(label, tx, utxos, script):
     print(f"; {label}")
     print(f"tx {tx.serialize_with_witness().hex()}")
     print("tx_in_idx 0")
     print(f"tx_script {script.hex()}")
-    print(f"utxos {utxo.serialize().hex()}")
+    print("utxos " + " ".join(u.serialize().hex() for u in utxos))
     print()
 
 
-def sig_for(priv, tx, utxo, script):
-    msg = TaprootSignatureHash(txTo=tx, spent_utxos=[utxo], hash_type=0,
-                               input_index=0, scriptpath=True, script=script)
+def emit_context(label, tx, utxo, script):
+    emit_context2(label, tx, [utxo], script)
+
+
+def sig_for_at(priv, tx, utxos, script, idx):
+    msg = TaprootSignatureHash(txTo=tx, spent_utxos=utxos, hash_type=0,
+                               input_index=idx, scriptpath=True, script=script)
     return sign_schnorr(priv, msg)
+
+
+def sig_for(priv, tx, utxo, script):
+    return sig_for_at(priv, tx, [utxo], script, 0)
 
 
 def wr(element):
@@ -261,7 +286,7 @@ def gen_htlc():
 P2D_DELEGATES = {
     "DELEGANY": "0 . 1",
     "DELEGCOV": "14 (41 (0 . 3)) (0 . 2)",
-    "DELEGSOL": "14 1 (0 . 5)",
+    "DELEGARG": "14 1 (0 . 5)",
 }
 
 
@@ -302,7 +327,7 @@ def gen_p2d():
 
     def blleval_env(deleg, sig):
         """The compiled argument tree for a delegation spend:
-        (((SYNPK . ORIGPK) . (DELEG . SOL)) . SIG)."""
+        (((SYNPK . ORIGPK) . (DELEG . ARGS)) . SIG)."""
         return (f"(((0x{synpk.hex()} . 0) . "
                 f"(({P2D_DELEGATES[deleg]}) . 0)) . 0x{sig.hex()})")
 
@@ -323,7 +348,7 @@ def gen_p2d():
     sig_cov_a = p2d_sig_for(KEY_P2D_SYNTH, hashes["DELEGCOV"], tx_a)
     print(f"def SIGANYA 0x{sig_any_a.hex()}")
     print(f"def SIGCOVA 0x{sig_cov_a.hex()}")
-    print(f"def SIGSOLA 0x{p2d_sig_for(KEY_P2D_SYNTH, hashes['DELEGSOL'], tx_a).hex()}")
+    print(f"def SIGARGA 0x{p2d_sig_for(KEY_P2D_SYNTH, hashes['DELEGARG'], tx_a).hex()}")
     print()
     print("; compiled path spends for context A")
     print(f"blleval @P2D {blleval_env('DELEGANY', sig_any_a)}")
@@ -337,11 +362,132 @@ def gen_p2d():
     print(f"def SIGCOVB 0x{p2d_sig_for(KEY_P2D_SYNTH, hashes['DELEGCOV'], tx_b).hex()}")
 
 
+def gen_singleton():
+    script = b"bll: singleton demo"
+    ipk = xonly(KEY_SGL_IPK)
+    proghash = tapleaf_hash(script)
+    spk, parity = taproot_spk(ipk, proghash, [])
+    cb = bytes([LEAF_VERSION_TAPSCRIPT | parity]) + ipk
+    innerpk = xonly(KEY_SGL_INNER)
+    dest = p2tr_raw(xonly(KEY_SGL_DEST))
+    genesis = messages.ser_uint256(FUNDING_TXID) + struct.pack("<I", 0)
+    # the inner program: (bip340_verify PK (bip342_txmsg) 1) with 1
+    # the whole environment, the 64 byte signature
+    inner_text = f"38 (0 . 0x{innerpk.hex()}) (42) 1"
+
+    def proof(tx):
+        return tx.serialize_without_witness()
+
+    def blleval_env(sig, p1, p2, pidx):
+        """The compiled argument tree for a singleton spend:
+        (((PROGHASH . GENESIS) . (INNER . IARGS)) .
+         ((PROOF . PROOF2) . PIDX))."""
+        return (f"(((0x{proghash.hex()} . 0x{genesis.hex()}) . "
+                f"(({inner_text}) . 0x{sig.hex()})) . "
+                f"((0x{p1.hex()} . {p2}) . {pidx}))")
+
+    print(f"def PROGHASH 0x{proghash.hex()}")
+    print(f"def GENESIS 0x{genesis.hex()}")
+    print(f"def INNER (q {inner_text})")
+    print()
+
+    # the launch transaction spends the genesis outpoint and creates
+    # the first singleton output at index 0, its witness is irrelevant
+    fund, _ = make_tx(dest, [(90001, spk), (8998, dest)], 0xffffffff, 0,
+                      script, cb)
+    fund.rehash()
+    print("; the launch transaction, revealed by the genesis spend")
+    print(f"def PROOFGEN 0x{proof(fund).hex()}")
+    print()
+
+    txa, utxoa = make_tx(spk, [(88001, spk), (1000, dest)], 0xffffffff, 0,
+                         script, cb, prev_txid=fund.sha256, prev_value=90001)
+    txa.rehash()
+    emit_context("context A: the genesis spend continues the chain", txa, utxoa, script)
+    print(f"def SIGA 0x{sig_for(KEY_SGL_INNER, txa, utxoa, script).hex()}")
+    print(f"def PROOFA 0x{proof(txa).hex()}")
+    print()
+
+    txb, utxob = make_tx(spk, [(86001, spk), (1000, dest)], 0xffffffff, 0,
+                         script, cb, prev_txid=txa.sha256, prev_value=88001)
+    txb.rehash()
+    emit_context("context B: an ancestry spend continues the chain", txb, utxob, script)
+    sig_b = sig_for(KEY_SGL_INNER, txb, utxob, script)
+    print(f"def SIGB 0x{sig_b.hex()}")
+    print(f"def PROOFB 0x{proof(txb).hex()}")
+    print()
+    print("; compiled path spend for context B")
+    print(f"blleval @SINGLETON {blleval_env(sig_b, proof(txa), '0x' + proof(fund).hex(), 0)}")
+    print()
+
+    txc, utxoc = make_tx(spk, [(85000, dest)], 0xffffffff, 0,
+                         script, cb, prev_txid=txb.sha256, prev_value=86001)
+    emit_context("context C: a retire spend, no odd output", txc, utxoc, script)
+    print(f"def SIGC 0x{sig_for(KEY_SGL_INNER, txc, utxoc, script).hex()}")
+    print()
+
+    txd, utxod = make_tx(spk, [(43001, spk), (41001, dest)], 0xffffffff, 0,
+                         script, cb, prev_txid=txb.sha256, prev_value=86001)
+    emit_context("context D: two odd outputs", txd, utxod, script)
+    print(f"def SIGD 0x{sig_for(KEY_SGL_INNER, txd, utxod, script).hex()}")
+    print()
+
+    txe, utxoe = make_tx(spk, [(85001, dest)], 0xffffffff, 0,
+                         script, cb, prev_txid=txb.sha256, prev_value=86001)
+    emit_context("context E: the odd output is at the wrong scriptPubKey", txe, utxoe, script)
+    print(f"def SIGE 0x{sig_for(KEY_SGL_INNER, txe, utxoe, script).hex()}")
+    print()
+
+    txf, utxof = make_tx(spk, [(84001, spk), (1000, dest)], 0xffffffff, 0,
+                         script, cb, prev_txid=txb.sha256, prev_value=86000)
+    emit_context("context F: the spent output's amount is even", txf, utxof, script)
+    print(f"def SIGF 0x{sig_for(KEY_SGL_INNER, txf, utxof, script).hex()}")
+    print()
+
+    # a look-alike chain funded from a different outpoint
+    fund_alt, _ = make_tx(dest, [(70001, spk), (28998, dest)], 0xffffffff, 0,
+                          script, cb, prev_txid=FUNDING_TXID_ALT)
+    fund_alt.rehash()
+    print("; the look-alike launch transaction for context G")
+    print(f"def PROOFALT 0x{proof(fund_alt).hex()}")
+    print()
+    txg, utxog = make_tx(spk, [(68001, spk), (1000, dest)], 0xffffffff, 0,
+                         script, cb, prev_txid=fund_alt.sha256, prev_value=70001)
+    emit_context("context G: a look-alike output funded outside the chain", txg, utxog, script)
+    print(f"def SIGG 0x{sig_for(KEY_SGL_INNER, txg, utxog, script).hex()}")
+    print()
+
+    txh, utxosh = make_tx2([(txb.sha256, 0, 86001, spk), (fund_alt.sha256, 0, 70001, spk)],
+                           [(155001, spk)], script, cb)
+    emit_context2("context H: two singleton outputs spent in one transaction", txh, utxosh, script)
+    print(f"def SIGH 0x{sig_for_at(KEY_SGL_INNER, txh, utxosh, script, 0).hex()}")
+    print()
+
+    txi, utxoi = make_tx(spk, [(1000, dest), (84001, spk)], 0xffffffff, 0,
+                         script, cb, prev_txid=txb.sha256, prev_value=86001)
+    emit_context("context I: the successor sits at a nonzero output index", txi, utxoi, script)
+    print(f"def SIGI 0x{sig_for(KEY_SGL_INNER, txi, utxoi, script).hex()}")
+    print()
+
+    # a launch variant with two odd outputs at the singleton
+    # scriptPubKey, output 1 may not claim the genesis branch
+    fund2, _ = make_tx(dest, [(45001, spk), (43999, spk)], 0xffffffff, 0,
+                       script, cb)
+    fund2.rehash()
+    print("; the two odd output launch variant for context J")
+    print(f"def PROOFGEN2 0x{proof(fund2).hex()}")
+    print()
+    txj, utxoj = make_tx(spk, [(42999, spk)], 0xffffffff, 0, script, cb,
+                         prev_txid=fund2.sha256, prev_value=43999, prev_vout=1)
+    emit_context("context J: a genesis claim from output index 1", txj, utxoj, script)
+    print(f"def SIGJ 0x{sig_for(KEY_SGL_INNER, txj, utxoj, script).hex()}")
+
+
 def main():
     targets = {"vault": gen_vault, "flexmarks": gen_flexmarks, "htlc": gen_htlc,
-               "p2d": gen_p2d}
+               "p2d": gen_p2d, "singleton": gen_singleton}
     if len(sys.argv) != 2 or sys.argv[1] not in targets:
-        print(f"usage: {sys.argv[0]} {{vault|flexmarks|htlc|p2d}}", file=sys.stderr)
+        print(f"usage: {sys.argv[0]} {{vault|flexmarks|htlc|p2d|singleton}}", file=sys.stderr)
         return 1
     targets[sys.argv[1]]()
     return 0
