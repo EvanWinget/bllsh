@@ -134,6 +134,10 @@ def emit_context(label, tx, utxo, script):
     emit_context2(label, tx, [utxo], script)
 
 
+# A target spending a non tapscript leaf must pass leaf_ver: the
+# default preserves the tapscript message of the earlier targets,
+# and a commitment style spend signed under it fails validation
+# with a bare signature error.
 def sig_for_at(priv, tx, utxos, script, idx, leaf_ver=LEAF_VERSION_TAPSCRIPT):
     msg = TaprootSignatureHash(txTo=tx, spent_utxos=utxos, hash_type=0,
                                input_index=idx, scriptpath=True, script=script,
@@ -554,7 +558,10 @@ def gen_commitment():
     print(f"spend 0 {txb.serialize_with_witness().hex()} {utxo.serialize().hex()}")
     print()
 
-    txc, utxo = spend_tx(b"\x81" + sig[:1])
+    # A fixed redundant encoding (a length prefixed one byte atom
+    # below 0x80), constant so regeneration cannot land on signature
+    # bytes whose 0x81 prefixed form happens to be canonical.
+    txc, utxo = spend_tx(b"\x81\x05")
     print("; context C: redundantly encoded environment")
     print(f"spend 0 {txc.serialize_with_witness().hex()} {utxo.serialize().hex()}")
     print()

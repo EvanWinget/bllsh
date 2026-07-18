@@ -93,22 +93,19 @@ def deserialize_canonical(data: bytes, budget: Budget) -> Optional[Element]:
     per_element = costs.RD_PER_ELEMENT
     per_byte = costs.RD_PER_BYTE + costs.MALLOC_PER_BYTE
 
-    # Frames of the element under construction: [None] is a cons
-    # awaiting its left child, [left] is a cons awaiting its right.
-    frames: List[List[Optional[Element]]] = []
+    # Pending cons frames: None is a cons awaiting its left child, an
+    # Element is that left child awaiting its right.
+    frames: List[Optional[Element]] = []
     pos = 0
 
-    def fail(msg: str) -> Error:
-        for frame in frames:
-            if frame[0] is not None:
-                frame[0].deref()
-        return Error(msg)
+    def drop_frames() -> None:
+        for left in frames:
+            if left is not None:
+                left.deref()
 
-    def latch() -> None:
-        for frame in frames:
-            if frame[0] is not None:
-                frame[0].deref()
-        return None
+    def fail(msg: str) -> Error:
+        drop_frames()
+        return Error(msg)
 
     while True:
         if pos >= len(data):
@@ -120,16 +117,19 @@ def deserialize_canonical(data: bytes, budget: Budget) -> Optional[Element]:
             # The cons charge is spent at marker read time, before
             # either child is decoded.
             if not budget.charge(per_element):
-                return latch()
-            frames.append([None])
+                drop_frames()
+                return None
+            frames.append(None)
             continue
         elif b == 0x80:
             if not budget.charge(per_element):
-                return latch()
+                drop_frames()
+                return None
             el = Atom(0)
         elif b < 0x80:
             if not budget.charge(per_element):
-                return latch()
+                drop_frames()
+                return None
             el = Atom(bytes([b]))
         elif b < 0xc0:
             n = b & 0x3f
@@ -140,7 +140,8 @@ def deserialize_canonical(data: bytes, budget: Budget) -> Optional[Element]:
             if n == 1 and data[pos] < 0x80:
                 return fail("witness element not canonical: one byte atom with length prefix")
             if not budget.charge(per_element + per_byte * n):
-                return latch()
+                drop_frames()
+                return None
             el = Atom(data[pos:pos + n])
             pos += n
         elif b < 0xe0:
@@ -153,7 +154,8 @@ def deserialize_canonical(data: bytes, budget: Budget) -> Optional[Element]:
             if pos + n > len(data):
                 return fail("witness element truncated")
             if not budget.charge(per_element + per_byte * n):
-                return latch()
+                drop_frames()
+                return None
             el = Atom(data[pos:pos + n])
             pos += n
         elif b < 0xf0:
@@ -166,7 +168,8 @@ def deserialize_canonical(data: bytes, budget: Budget) -> Optional[Element]:
             if pos + n > len(data):
                 return fail("witness element truncated")
             if not budget.charge(per_element + per_byte * n):
-                return latch()
+                drop_frames()
+                return None
             el = Atom(data[pos:pos + n])
             pos += n
         else:
@@ -182,11 +185,10 @@ def deserialize_canonical(data: bytes, budget: Budget) -> Optional[Element]:
                     el.deref()
                     return fail("witness element has trailing bytes")
                 return el
-            if frames[-1][0] is None:
-                frames[-1][0] = el
+            if frames[-1] is None:
+                frames[-1] = el
                 break
-            left = frames.pop()[0]
-            el = Cons(left, el)
+            el = Cons(frames.pop(), el)
 
 
 def strip_annex(stack: List[bytes]) -> Tuple[List[bytes], Optional[bytes]]:
@@ -230,13 +232,16 @@ def verify_commitment(spk: bytes, leaf_script: bytes, control_block: bytes) -> O
 
 @dataclass
 class SpendResult:
-    """The verdict of one spend validation. reason is empty exactly
-    when the spend is valid. used and limit report the budget so
-    drivers can show what the evaluation cost."""
-    valid: bool
+    """The verdict of one spend validation: valid exactly when reason
+    is empty. used and limit report the budget when one was derived,
+    and stay zero for spends refused before the budget exists."""
     reason: str
     used: int = 0
     limit: int = 0
+
+    @property
+    def valid(self) -> bool:
+        return not self.reason
 
     def __str__(self):
         if self.valid:
@@ -252,22 +257,22 @@ def verify_spend(tx: CTransaction, input_index: int, spent_outputs: List[CTxOut]
     the spend. The four opcode globals are set as one unit here, so
     a driver never assembles a context by hand."""
     if input_index < 0 or input_index >= len(tx.vin):
-        return SpendResult(False, "input index out of range")
+        return SpendResult("input index out of range")
     if len(spent_outputs) != len(tx.vin):
-        return SpendResult(False, "one spent output per input required")
+        return SpendResult("one spent output per input required")
     if input_index >= len(tx.wit.vtxinwit):
-        return SpendResult(False, "witness missing")
+        return SpendResult("witness missing")
 
     witness = tx.wit.vtxinwit[input_index]
     stack, annex = strip_annex(list(witness.scriptWitness.stack))
     if len(stack) != 3:
-        return SpendResult(False, "witness stack must be environment, leaf script, control block")
+        return SpendResult("witness stack must be environment, leaf script, control block")
     env_bytes, leaf_script, control_block = stack
 
     reason = verify_commitment(spent_outputs[input_index].scriptPubKey,
                                leaf_script, control_block)
     if reason is not None:
-        return SpendResult(False, reason)
+        return SpendResult(reason)
 
     # The full serialized witness of this input buys the budget:
     # every item including the annex, each length prefixed, plus the
@@ -277,7 +282,7 @@ def verify_spend(tx: CTransaction, input_index: int, spent_outputs: List[CTxOut]
     budget = Budget(limit)
 
     def refused(reason: str) -> SpendResult:
-        return SpendResult(False, reason, used=budget.used, limit=limit)
+        return SpendResult(reason, used=budget.used, limit=limit)
 
     program = deserialize_canonical(leaf_script, budget)
     if program is None:
@@ -303,11 +308,14 @@ def verify_spend(tx: CTransaction, input_index: int, spent_outputs: List[CTxOut]
 
     result = bll.eval(program, env, budget)
     if isinstance(result, Error):
-        reason = str(result)
+        # The bare message keeps one verdict vocabulary across the
+        # phases: a budget latched during decode and one exhausted
+        # during evaluation read identically.
+        reason = result.val2
         result.deref()
         return refused(reason)
     if result.is_nil():
         result.deref()
         return refused("program result is nil")
     result.deref()
-    return SpendResult(True, "", used=budget.used, limit=limit)
+    return SpendResult("", used=budget.used, limit=limit)

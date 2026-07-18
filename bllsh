@@ -368,11 +368,13 @@ class BTCLispRepl(cmd.Cmd):
         Validates input IDX of the transaction as a bll taproot
         script path spend: the committed leaf script is the program,
         the witness supplies the environment, and the budget comes
-        from the witness size. Prints the verdict and the budget
-        spent. A spend that reaches evaluation also sets the tx
-        introspection context (tx, tx_in_idx, tx_script, utxos) as
-        one derivation, replacing the four individual commands for
-        spend-shaped evaluation."""
+        from the witness size. Prints the verdict, and the budget
+        spent when the spend got far enough to derive one. The tx
+        introspection context (tx, tx_in_idx, tx_script, utxos) is
+        cleared first and set as one derivation when the spend
+        reaches evaluation, so it never mixes two spends: after a
+        refused spend it is unset, replacing the four individual
+        commands for spend-shaped evaluation."""
         args = arg.split()
         if len(args) < 3:
             print("Expected input index, tx hex and one utxo hex per input")
@@ -386,9 +388,14 @@ class BTCLispRepl(cmd.Cmd):
         except Exception:
             print("Could not parse spend arguments")
             return
+        Set_GLOBAL_TX(None)
+        Set_GLOBAL_TX_INPUT_IDX(None)
+        Set_GLOBAL_TX_SCRIPT(None)
+        Set_GLOBAL_UTXOS(None)
         r = spend.verify_spend(tx, idx, utxos)
         print(r)
-        print(f"budget: {r.used} of {r.limit}")
+        if r.limit:
+            print(f"budget: {r.used} of {r.limit}")
 
     @handle_exc
     def do_utxos(self, arg):

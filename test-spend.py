@@ -52,6 +52,10 @@ def leaf_hash(script):
     return TaggedHash("TapLeaf", bytes([spend.LEAF_VERSION_BLL]) + ser_string(script))
 
 
+P_TRUE = prog("(q . 1)")
+STACK_ERR = "invalid: witness stack must be environment, leaf script, control block"
+
+
 def ser_atom(b):
     a = Atom(b)
     s = SerDeser.Serialize(a)
@@ -145,8 +149,9 @@ def two_byte_floor():
     """0x40 is the first length the two byte prefix may carry."""
     el = spend.deserialize_canonical(b"\xc0\x40" + bytes(0x40), BIG)
     ok = not isinstance(el, Error) and el.val1 == 0x40
+    shown = str(el)[:20]
     el.deref()
-    return ok, str(el)[:20]
+    return ok, shown
 case("decode/two-byte-floor", two_byte_floor)
 
 def round_trip():
@@ -199,46 +204,45 @@ case("decode/budget-latch", decode_latch)
 
 # ---- the spend verifier ----
 
-spendcase("spend/valid", prog("(q . 1)"), b"\x01", "valid")
+spendcase("spend/valid", P_TRUE, b"\x01", "valid")
 spendcase("spend/env-decides-truthy", prog("1"), b"\x01", "valid")
 spendcase("spend/env-decides-nil", prog("1"), b"\x80",
           "invalid: program result is nil")
 spendcase("spend/nil-result", prog("(q . 0)"), b"\x01",
           "invalid: program result is nil")
 spendcase("spend/error-result", prog("(x)"), b"\x01",
-          "invalid: ERR(Exception: )")
+          "invalid: Exception: ")
 spendcase("spend/function-result", prog("(partial (q . 34))"), b"\x01",
-          "invalid: ERR(program result contains a function object)")
+          "invalid: program result contains a function object")
 spendcase("spend/budget-exhausted", prog("(shift (q . 1) (q . 4000000))"),
-          b"\x01", "invalid: ERR(budget exhausted)")
-spendcase("spend/with-merkle-path", prog("(q . 1)"), b"\x01", "valid",
+          b"\x01", "invalid: budget exhausted")
+spendcase("spend/with-merkle-path", P_TRUE, b"\x01", "valid",
           path=(bytes(32),))
-spendcase("spend/with-annex", prog("(q . 1)"), b"\x01", "valid",
+spendcase("spend/with-annex", P_TRUE, b"\x01", "valid",
           annex=b"\x50annex")
-spendcase("spend/extra-stack-item", prog("(q . 1)"), b"\x01",
-          "invalid: witness stack must be environment, leaf script, control block",
-          extra=b"\x01")
-spendcase("spend/wrong-leaf-version", prog("(q . 1)"), b"\x01",
+spendcase("spend/extra-stack-item", P_TRUE, b"\x01",
+          STACK_ERR, extra=b"\x01")
+spendcase("spend/wrong-leaf-version", P_TRUE, b"\x01",
           "invalid: leaf version is not bll", leafver=0xc0)
-spendcase("spend/tampered-program", prog("(q . 1)"), b"\x01",
+spendcase("spend/tampered-program", P_TRUE, b"\x01",
           "invalid: control block does not match spent output",
           reveal=prog("(q . 2)"))
-spendcase("spend/non-p2tr-output", prog("(q . 1)"), b"\x01",
+spendcase("spend/non-p2tr-output", P_TRUE, b"\x01",
           "invalid: spent output is not pay-to-taproot",
           spk=bytes([0x00, 0x20]) + bytes(32))
-spendcase("spend/bad-control-block-size", prog("(q . 1)"), b"\x01",
+spendcase("spend/bad-control-block-size", P_TRUE, b"\x01",
           "invalid: control block size invalid",
           cb=bytes([spend.LEAF_VERSION_BLL]) + IPK + b"\x00")
-spendcase("spend/control-path-too-long", prog("(q . 1)"), b"\x01",
+spendcase("spend/control-path-too-long", P_TRUE, b"\x01",
           "invalid: control block path too long",
           cb=bytes([spend.LEAF_VERSION_BLL]) + IPK + bytes(32 * 129))
-spendcase("spend/index-out-of-range", prog("(q . 1)"), b"\x01",
+spendcase("spend/index-out-of-range", P_TRUE, b"\x01",
           "invalid: input index out of range", idx=1)
-spendcase("spend/utxo-count-mismatch", prog("(q . 1)"), b"\x01",
+spendcase("spend/utxo-count-mismatch", P_TRUE, b"\x01",
           "invalid: one spent output per input required", utxos=[])
-spendcase("spend/redundant-env-encoding", prog("(q . 1)"), b"\x81\x05",
+spendcase("spend/redundant-env-encoding", P_TRUE, b"\x81\x05",
           "invalid: environment: witness element not canonical: one byte atom with length prefix")
-spendcase("spend/env-trailing-bytes", prog("(q . 1)"), b"\x01\x01",
+spendcase("spend/env-trailing-bytes", P_TRUE, b"\x01\x01",
           "invalid: environment: witness element has trailing bytes")
 spendcase("spend/redundant-program-encoding", b"\x81\x05", b"\x01",
           "invalid: leaf script: witness element not canonical: one byte atom with length prefix")
@@ -246,7 +250,7 @@ spendcase("spend/empty-program", b"", b"\x01",
           "invalid: leaf script: witness element truncated")
 
 def missing_witness():
-    tx, spent = make_spend(prog("(q . 1)"), b"\x01")
+    tx, spent = make_spend(P_TRUE, b"\x01")
     tx.wit.vtxinwit = []
     r = spend.verify_spend(tx, 0, spent)
     return str(r) == "invalid: witness missing", str(r)
@@ -254,15 +258,14 @@ case("spend/missing-witness", missing_witness)
 
 def two_item_stack():
     """A key-path-shaped witness is not a bll spend."""
-    tx, spent = make_spend(prog("(q . 1)"), b"\x01")
+    tx, spent = make_spend(P_TRUE, b"\x01")
     tx.wit.vtxinwit[0].scriptWitness.stack = tx.wit.vtxinwit[0].scriptWitness.stack[1:]
     r = spend.verify_spend(tx, 0, spent)
-    want = "invalid: witness stack must be environment, leaf script, control block"
-    return str(r) == want, str(r)
+    return str(r) == STACK_ERR, str(r)
 case("spend/two-item-stack", two_item_stack)
 
 def wrong_parity():
-    tx, spent = make_spend(prog("(q . 1)"), b"\x01")
+    tx, spent = make_spend(P_TRUE, b"\x01")
     stack = tx.wit.vtxinwit[0].scriptWitness.stack
     stack[2] = bytes([stack[2][0] ^ 1]) + stack[2][1:]
     r = spend.verify_spend(tx, 0, spent)
@@ -304,7 +307,7 @@ def sighash_names_executing_leaf():
         tx, spent = make_spend(program, ser_atom(sign_schnorr(priv, msg)))
         results.append(str(spend.verify_spend(tx, 0, spent)))
     ok = (results[0] == "valid"
-          and results[1] == "invalid: ERR(bip340_verify: invalid, non-empty signature)")
+          and results[1] == "invalid: bip340_verify: invalid, non-empty signature")
     return ok, f"{results}"
 case("wiring/sighash-names-executing-leaf", sighash_names_executing_leaf)
 
@@ -312,7 +315,7 @@ case("wiring/sighash-names-executing-leaf", sighash_names_executing_leaf)
 
 def budget_from_witness():
     """The limit is bought by the input's full serialized witness."""
-    tx, spent = make_spend(prog("(q . 1)"), b"\x01")
+    tx, spent = make_spend(P_TRUE, b"\x01")
     r = spend.verify_spend(tx, 0, spent)
     expect = budget_for_witness_size(len(tx.wit.vtxinwit[0].serialize()))
     ok = r.valid and r.limit == expect and 0 < r.used < r.limit
@@ -321,10 +324,10 @@ case("budget/from-witness-size", budget_from_witness)
 
 def budget_counts_annex():
     """Annex bytes buy budget like any other witness bytes."""
-    tx0, spent0 = make_spend(prog("(q . 1)"), b"\x01")
+    tx0, spent0 = make_spend(P_TRUE, b"\x01")
     r0 = spend.verify_spend(tx0, 0, spent0)
     annex = b"\x50" + bytes(99)
-    tx1, spent1 = make_spend(prog("(q . 1)"), b"\x01", annex=annex)
+    tx1, spent1 = make_spend(P_TRUE, b"\x01", annex=annex)
     r1 = spend.verify_spend(tx1, 0, spent1)
     delta = (len(tx1.wit.vtxinwit[0].serialize())
              - len(tx0.wit.vtxinwit[0].serialize()))
@@ -343,20 +346,20 @@ case("budget/block-weight-clamp",
 
 def no_leaks():
     """Every verdict path frees what it built."""
-    tx, spent = make_spend(prog("(q . 1)"), b"\x01")
+    leafcheck = prog("(= (tx (q . 6)) 1)")
+    tx, spent = make_spend(P_TRUE, b"\x01")
     spend.verify_spend(tx, 0, spent)  # warm the interned atoms
     before = ALLOCATOR.x
     for program, env, kw in [
-            (prog("(q . 1)"), b"\x01", {}),
+            (P_TRUE, b"\x01", {}),
             (prog("1"), b"\x80", {}),
             (prog("(x)"), b"\x01", {}),
             (prog("(partial (q . 34))"), b"\x01", {}),
             (prog("(shift (q . 1) (q . 4000000))"), b"\x01", {}),
-            (prog("(q . 1)"), b"\x81\x05", {}),
+            (P_TRUE, b"\x81\x05", {}),
             (b"\x81\x05", b"\x01", {}),
-            (prog("(q . 1)"), b"\x01", {"reveal": prog("(q . 2)")}),
-            (prog("(= (tx (q . 6)) 1)"),
-             ser_atom(leaf_hash(prog("(= (tx (q . 6)) 1)"))), {}),
+            (P_TRUE, b"\x01", {"reveal": prog("(q . 2)")}),
+            (leafcheck, ser_atom(leaf_hash(leafcheck)), {}),
     ]:
         tx, spent = make_spend(program, env, **kw)
         spend.verify_spend(tx, 0, spent)
