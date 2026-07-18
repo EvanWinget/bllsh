@@ -18,7 +18,13 @@ p2_delegated_puzzle_or_hidden_puzzle) recorded 2026-07-18.
    current one, and the symbolic evaluator's environment is a symbol
    table with no bll value form, so the short form cannot be
    mirrored. bll semantics are unchanged. The repl's own TODO wanted
-   this surface, so it is an upstream candidate.
+   this surface, so it is an upstream candidate. Like the existing
+   special names (`if`, `q`, `report`, `partial`), `a` now resolves
+   before user symbols, so a def or parameter named `a` is silently
+   captured on the symbolic path while a bare parameter still
+   resolves on the compiled path, a divergence the other special
+   names share. A def-time diagnostic for reserved names would close
+   it, an upstream question.
 
 2. **Quoted program literals must be spelled in opcode numbers.** A
    quoted tree containing symbols is symbolic, not bll, so it cannot
@@ -28,10 +34,13 @@ p2_delegated_puzzle_or_hidden_puzzle) recorded 2026-07-18.
    spelling into a bll tree (the repl TODO's `@SYM` generalization
    points the same way) would remove the noise. Upstream candidate.
 
-3. **A nested apply is one debugger step.** The symbolic apply runs
-   its program through a nested bll evaluation, so the repl's step
-   and trace facilities see the whole delegate execute as one atomic
-   step. Acceptable for now, worth a note if delegates grow.
+3. **A nested apply is one debugger step.** The symbolic apply
+   drives its program through nested bll evaluation inside a single
+   symbolic step, so the repl's step and trace facilities see the
+   whole delegate execute atomically. The evaluator's step allowance
+   and allocation cap do interpose between the nested steps, so
+   termination is preserved, only the visibility is coarse.
+   Acceptable for now, worth a note if delegates grow.
 
 ## Signatures and replay
 
