@@ -256,9 +256,13 @@ def gen_htlc():
     print(f"def SIGTIMETYPED 0x{sig_for(KEY_HTLC_SEND, timetyped, utxo, script).hex()}")
 
 
-DELEG_ANY = "(0 . 1)"
-DELEG_COV = "(14 (41 (0 . 3)) (0 . 2))"
-DELEG_SOL = "(14 1 (0 . 5))"
+# the delegate program trees, spelled once as the numeric bll text
+# that both the emitted def lines and the tree hashes derive from
+P2D_DELEGATES = {
+    "DELEGANY": "0 . 1",
+    "DELEGCOV": "14 (41 (0 . 3)) (0 . 2)",
+    "DELEGSOL": "14 1 (0 . 5)",
+}
 
 
 def sha256tree(el):
@@ -270,19 +274,19 @@ def sha256tree(el):
 
 
 def deleg_hash(text):
-    el = SExpr.parse(text)
+    el = SExpr.parse(f"({text})")
     r = sha256tree(el)
     el.deref()
     return r
 
 
-def p2d_sig_for(priv, deleg_text, tx):
+def p2d_sig_for(priv, treehash, tx):
     """The AGG_SIG_ME analogue: a signature over the delegate's tree
     hash bound to the spent outpoint, matching the example's
     (sha256 (SHA256TREE DELEG) (tx 11) (tx 12)). The transaction's
     outputs are deliberately not covered, only the delegate is."""
     prevout = tx.vin[0].prevout
-    msg = messages.sha256(deleg_hash(deleg_text)
+    msg = messages.sha256(treehash
                           + messages.ser_uint256(prevout.hash)
                           + struct.pack("<I", prevout.n))
     return sign_schnorr(priv, msg)
@@ -293,32 +297,44 @@ def gen_p2d():
     ipk = xonly(KEY_P2D_IPK)
     spk, parity = taproot_spk(ipk, tapleaf_hash(script), [])
     cb = bytes([LEAF_VERSION_TAPSCRIPT | parity]) + ipk
+    synpk = xonly(KEY_P2D_SYNTH)
+    hashes = {name: deleg_hash(text) for name, text in P2D_DELEGATES.items()}
 
-    print(f"; synthetic pubkey {xonly(KEY_P2D_SYNTH).hex()}")
-    print(f"; sha256tree DELEGANY {deleg_hash(DELEG_ANY).hex()}")
-    print(f"; sha256tree DELEGCOV {deleg_hash(DELEG_COV).hex()}")
-    print(f"; sha256tree DELEGSOL {deleg_hash(DELEG_SOL).hex()}")
+    def blleval_env(deleg, sig):
+        """The compiled argument tree for a delegation spend:
+        (((SYNPK . ORIGPK) . (DELEG . SOL)) . SIG)."""
+        return (f"(((0x{synpk.hex()} . 0) . "
+                f"(({P2D_DELEGATES[deleg]}) . 0)) . 0x{sig.hex()})")
+
+    print(f"; synthetic pubkey {synpk.hex()}")
+    for name, treehash in hashes.items():
+        print(f"; sha256tree {name} {treehash.hex()}")
     print()
-    print(f"def SYNPK 0x{xonly(KEY_P2D_SYNTH).hex()}")
-    print("def DELEGANY (q 0 . 1)")
-    print("def DELEGCOV (q 14 (41 (0 . 3)) (0 . 2))")
-    print("def DELEGSOL (q 14 1 (0 . 5))")
+    print(f"def SYNPK 0x{synpk.hex()}")
+    for name, text in P2D_DELEGATES.items():
+        print(f"def {name} (q {text})")
     print()
 
     outputs_a = [(60000, p2tr_raw(xonly(KEY_P2D_DEST1))),
                  (39000, p2tr_raw(xonly(KEY_P2D_DEST2)))]
     tx_a, utxo_a = make_tx(spk, outputs_a, 0xffffffff, 0, script, cb)
     emit_context("context A: two outputs, first funding outpoint", tx_a, utxo_a, script)
-    print(f"def SIGANYA 0x{p2d_sig_for(KEY_P2D_SYNTH, DELEG_ANY, tx_a).hex()}")
-    print(f"def SIGCOVA 0x{p2d_sig_for(KEY_P2D_SYNTH, DELEG_COV, tx_a).hex()}")
-    print(f"def SIGSOLA 0x{p2d_sig_for(KEY_P2D_SYNTH, DELEG_SOL, tx_a).hex()}")
+    sig_any_a = p2d_sig_for(KEY_P2D_SYNTH, hashes["DELEGANY"], tx_a)
+    sig_cov_a = p2d_sig_for(KEY_P2D_SYNTH, hashes["DELEGCOV"], tx_a)
+    print(f"def SIGANYA 0x{sig_any_a.hex()}")
+    print(f"def SIGCOVA 0x{sig_cov_a.hex()}")
+    print(f"def SIGSOLA 0x{p2d_sig_for(KEY_P2D_SYNTH, hashes['DELEGSOL'], tx_a).hex()}")
+    print()
+    print("; compiled path spends for context A")
+    print(f"blleval @P2D {blleval_env('DELEGANY', sig_any_a)}")
+    print(f"blleval @P2D {blleval_env('DELEGCOV', sig_cov_a)}")
     print()
 
     outputs_b = [(99000, p2tr_raw(xonly(KEY_P2D_DEST1)))]
     tx_b, utxo_b = make_tx(spk, outputs_b, 0xffffffff, 0, script, cb,
                            prev_txid=FUNDING_TXID_ALT)
     emit_context("context B: one output, different funding outpoint", tx_b, utxo_b, script)
-    print(f"def SIGCOVB 0x{p2d_sig_for(KEY_P2D_SYNTH, DELEG_COV, tx_b).hex()}")
+    print(f"def SIGCOVB 0x{p2d_sig_for(KEY_P2D_SYNTH, hashes['DELEGCOV'], tx_b).hex()}")
 
 
 def main():
