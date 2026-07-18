@@ -117,16 +117,20 @@ evals("apply/nested-apply", "(a (q 1 (0 0 . 1) (0 . 0)) (q . 0))", "1")
 evals("apply/in-user-func", "(APPLY2 (q 0 . 1) 9)", "1", defs=[APPLY2_DEF])
 
 
-def compile_parity():
-    """The symbolic and compiled paths agree on an apply result."""
-    r0 = sym_run("(APPLY2 (q 0 . 1) 9)", defs=[APPLY2_DEF])
-    r1 = compiled_run("APPLY2", "((0 . 1) . 9)", defs=[APPLY2_DEF])
-    ok = (not isinstance(r0, Error) and not isinstance(r1, Error)
-          and str(r0) == str(r1))
-    shown = f"symbolic {str(r0)[:30]}, compiled {str(r1)[:30]}"
-    Element.deref_all(r0, r1)
-    return ok, shown
-case("apply/compile-parity", compile_parity)
+def parity(name, symsrc, fname, envsrc, defs):
+    """The symbolic and compiled paths agree on a non-error result."""
+    def fn():
+        r0 = sym_run(symsrc, defs=defs)
+        r1 = compiled_run(fname, envsrc, defs=defs)
+        ok = (not isinstance(r0, Error) and not isinstance(r1, Error)
+              and str(r0) == str(r1))
+        shown = f"symbolic {str(r0)[:30]}, compiled {str(r1)[:30]}"
+        Element.deref_all(r0, r1)
+        return ok, shown
+    case(name, fn)
+
+parity("apply/compile-parity",
+       "(APPLY2 (q 0 . 1) 9)", "APPLY2", "((0 . 1) . 9)", [APPLY2_DEF])
 
 
 # ---- tree recursion over the program operand's shape ----
@@ -149,16 +153,8 @@ tree_hash("sha256tree/pair", "(0 . 1)")
 tree_hash("sha256tree/deep", "((0 . 1) 0 . 1)")
 
 
-def tree_hash_compiled():
-    """The compiled SHA256TREE agrees with the symbolic result."""
-    r0 = sym_run("(SHA256TREE (q 0 . 1))", defs=[SHA256TREE_DEF])
-    r1 = compiled_run("SHA256TREE", "(0 . 1)", defs=[SHA256TREE_DEF])
-    ok = (not isinstance(r0, Error) and not isinstance(r1, Error)
-          and str(r0) == str(r1))
-    shown = f"symbolic {str(r0)[:20]}, compiled {str(r1)[:20]}"
-    Element.deref_all(r0, r1)
-    return ok, shown
-case("sha256tree/compile-parity", tree_hash_compiled)
+parity("sha256tree/compile-parity",
+       "(SHA256TREE (q 0 . 1))", "SHA256TREE", "(0 . 1)", [SHA256TREE_DEF])
 
 
 # ---- the arity restriction and other escape routes ----
@@ -169,6 +165,10 @@ errs("apply/arity-one", "(a (q 0 . 1))",
      "a: requires a program and an environment")
 errs("apply/arity-three", "(a (q . 1) (q . 2) (q . 3))",
      "too many args to apply")
+# the same arity error from inside a user function body, where the
+# environment is a live local symbol table rather than the dummy
+errs("apply/arity-three-in-user-func", "(F (q . 1))",
+     "too many args to apply", defs=["(F P) (a P P P)"])
 errs("apply/improper-args", "(a (q . 1) . 5)",
      "argument to a is improper list")
 # a function object is not a program
@@ -183,6 +183,15 @@ errs("apply/symbolic-program", "(a (q sha256 (0 . 1)) (q . 0))",
 errs("apply/nested-exhaustion",
      "(a (q 27 (0 . 1) (0 . 36893488147419103232)) (q . 0))",
      "budget exhausted")
+# the symbolic evaluator's guards stay active across the nested run:
+# a self-applying program hits the step allowance instead of hanging
+errs("apply/nested-cost-overrun", "(a (q 1 1 1) (q 1 1 1))",
+     "cost overrun, aborting")
+# and a shift affordable under the budget still hits the allocation
+# cap between nested steps
+errs("apply/nested-memory-overrun",
+     "(a (q 27 (0 . 1) (0 . 4000000)) (q . 0))",
+     "memory overrun, aborting")
 
 
 def compile_arity():
@@ -208,9 +217,13 @@ def no_leaks():
                 "(a (q 0 . 1))",
                 "(a (q . 1) (q . 2) (q . 3))",
                 "(a (partial sha256) (q . 0))",
-                "(a (q 27 (0 . 1) (0 . 36893488147419103232)) (q . 0))"]:
+                "(a (q 27 (0 . 1) (0 . 36893488147419103232)) (q . 0))",
+                "(a (q 1 1 1) (q 1 1 1))",
+                "(a (q 27 (0 . 1) (0 . 4000000)) (q . 0))"]:
         r = sym_run(src)
         r.deref()
+    r = sym_run("(F (q . 1))", defs=["(F P) (a P P P)"])
+    r.deref()
     r = sym_run("(SHA256TREE (q 0 . 1))", defs=[SHA256TREE_DEF])
     r.deref()
     leaked = ALLOCATOR.x - before

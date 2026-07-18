@@ -11,7 +11,7 @@ from typing import List, Optional, Any
 from costs import Budget, DEFAULT_BUDGET
 from element import ALLOCATOR, Element, SExpr, Atom, Cons, Error, Func, FuncClass, Symbol
 from opcodes import SExpr_FUNCS, Op_FUNCS, Opcode
-from bll import OpAtom, eval as bll_eval
+from bll import OpAtom, WorkItem as BLLWorkItem
 from workitem import fn_fin, fn_quote, fn_op, fn_partial
 
 ####
@@ -63,6 +63,16 @@ class SymbolTable(SymbolContainer):
             return None
         return self.mkinfo(self.syms[symname])
 
+    @staticmethod
+    def release_entry(value):
+        # value entries are Elements, function entries are
+        # (params, body) tuples
+        if isinstance(value, tuple):
+            for e in value:
+                e.deref()
+        else:
+            value.deref()
+
     def set(self, symname, value):
         # XXX: cope with default values for parameters
         assert self.refcnt == 1
@@ -72,22 +82,14 @@ class SymbolTable(SymbolContainer):
             assert all(isinstance(v, Element) for v in value)
 
         if symname in self.syms:
-            if isinstance(self.syms[symname], tuple):
-                for e in self.syms[symname]:
-                    e.deref()
-            else:
-                self.syms[symname].deref()
+            self.release_entry(self.syms[symname])
         self.syms[symname] = value
 
     def unset(self, symname):
         assert self.refcnt == 1
         assert isinstance(symname, str), f"{repr(symname)} not a str?"
         if symname in self.syms:
-            if isinstance(self.syms[symname], tuple):
-                for e in self.syms[symname]:
-                    e.deref()
-            else:
-                self.syms[symname].deref()
+            self.release_entry(self.syms[symname])
             del self.syms[symname]
 
     def bumpref(self):
@@ -97,14 +99,8 @@ class SymbolTable(SymbolContainer):
     def deref(self):
         self.refcnt -= 1
         if self.refcnt == 0:
-            # function entries are (params, body) tuples, the same
-            # two shapes set and unset already release
             for _, v in self.syms.items():
-                if isinstance(v, tuple):
-                    for e in v:
-                        e.deref()
-                else:
-                    v.deref()
+                self.release_entry(v)
             self.syms = None
 
 class SymbolIndex(SymbolContainer):
@@ -440,11 +436,31 @@ class fn_symbll_apply(FuncClass):
             assert i.is_atom() and i.val2 == b'\x01'
             i.deref()
             bllenv, prog = info.steal_children()
-            # The nested evaluation charges the same budget the
-            # shared opcode machinery already uses, and its result
-            # gate rejects programs that are not bll values, so an
-            # Error result here is delivered like any other.
-            workitem.fin_value(bll_eval(prog, bllenv, workitem.budget))
+            # The program runs on bll's machinery, but it is stepped
+            # here rather than handed to bll.eval so the symbolic
+            # evaluator's own guards stay active: every nested step
+            # charges the step allowance and the allocation cap is
+            # checked between steps, so a looping or allocation heavy
+            # program aborts instead of hanging the evaluator. The
+            # bll result gate rejects programs that are not bll
+            # values, so an Error result is delivered like any other.
+            sub = BLLWorkItem.begin(prog, bllenv, workitem.budget)
+            while not sub.finished() and not sub.budget.exhausted:
+                sub.step()
+                workitem.costleft -= 1
+                if workitem.costleft <= 0:
+                    sub.unwind()
+                    workitem.error("cost overrun, aborting")
+                    return
+                if ALLOCATOR.x > 400000:
+                    sub.unwind()
+                    workitem.error("memory overrun, aborting")
+                    return
+            if sub.budget.exhausted:
+                sub.unwind()
+                workitem.fin_value(Error("budget exhausted"))
+            else:
+                workitem.fin_value(sub.get_result())
         elif isinstance(args, Cons):
             arg, rest = args.steal_children()
             workitem.new_continuation(Func(cls, None, state), rest, env)
@@ -467,7 +483,10 @@ class fn_symbll_apply(FuncClass):
                 left.deref()
                 newst = Cons(Atom(1), Cons(value, prog_el))
             else:
-                Element.deref_all(left, prog_el, value, args, env)
+                # env is a symbol table, not an Element, so it takes
+                # its own deref
+                env.deref()
+                Element.deref_all(left, prog_el, value, args)
                 workitem.error("too many args to apply")
                 return
 
