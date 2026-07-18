@@ -97,8 +97,14 @@ class SymbolTable(SymbolContainer):
     def deref(self):
         self.refcnt -= 1
         if self.refcnt == 0:
+            # function entries are (params, body) tuples, the same
+            # two shapes set and unset already release
             for _, v in self.syms.items():
-                v.deref()
+                if isinstance(v, tuple):
+                    for e in v:
+                        e.deref()
+                else:
+                    v.deref()
             self.syms = None
 
 class SymbolIndex(SymbolContainer):
