@@ -11,7 +11,7 @@ from typing import List, Optional, Any
 from costs import Budget, DEFAULT_BUDGET
 from element import ALLOCATOR, Element, SExpr, Atom, Cons, Error, Func, FuncClass, Symbol
 from opcodes import SExpr_FUNCS, Op_FUNCS, Opcode
-from bll import OpAtom
+from bll import OpAtom, WorkItem as BLLWorkItem
 from workitem import fn_fin, fn_quote, fn_op, fn_partial
 
 ####
@@ -63,6 +63,16 @@ class SymbolTable(SymbolContainer):
             return None
         return self.mkinfo(self.syms[symname])
 
+    @staticmethod
+    def release_entry(value):
+        # value entries are Elements, function entries are
+        # (params, body) tuples
+        if isinstance(value, tuple):
+            for e in value:
+                e.deref()
+        else:
+            value.deref()
+
     def set(self, symname, value):
         # XXX: cope with default values for parameters
         assert self.refcnt == 1
@@ -72,22 +82,14 @@ class SymbolTable(SymbolContainer):
             assert all(isinstance(v, Element) for v in value)
 
         if symname in self.syms:
-            if isinstance(self.syms[symname], tuple):
-                for e in self.syms[symname]:
-                    e.deref()
-            else:
-                self.syms[symname].deref()
+            self.release_entry(self.syms[symname])
         self.syms[symname] = value
 
     def unset(self, symname):
         assert self.refcnt == 1
         assert isinstance(symname, str), f"{repr(symname)} not a str?"
         if symname in self.syms:
-            if isinstance(self.syms[symname], tuple):
-                for e in self.syms[symname]:
-                    e.deref()
-            else:
-                self.syms[symname].deref()
+            self.release_entry(self.syms[symname])
             del self.syms[symname]
 
     def bumpref(self):
@@ -98,7 +100,7 @@ class SymbolTable(SymbolContainer):
         self.refcnt -= 1
         if self.refcnt == 0:
             for _, v in self.syms.items():
-                v.deref()
+                self.release_entry(v)
             self.syms = None
 
 class SymbolIndex(SymbolContainer):
@@ -164,6 +166,9 @@ def ResolveSymbol(localsyms : SymbolTable, globalsyms : SymbolTable, symname : s
 
     if symname == "partial":
         return Func(fn_partial, None, Atom(0))
+
+    if symname == "a":
+        return Func(fn_symbll_apply, None, Atom(0))
 
     if symname in SExpr_FUNCS:
         opcls = Op_FUNCS[SExpr_FUNCS[symname]]
@@ -395,6 +400,98 @@ class fn_userfunc(FuncClass):
         myfunc = Func(cls, None, Cons(expr, Cons(dangling, satisfied)))
         workitem.new_continuation(myfunc, args, env)
 
+@FuncClass.implements_API
+class fn_symbll_apply(FuncClass):
+    # (a PROG ENV) evaluates both operands symbolically, then runs
+    # PROG as a bll program with ENV as its environment. The nested
+    # run uses the bll evaluator directly, because this workitem's
+    # continuations resolve symbols while a bll program's atoms are
+    # environment references.
+    #
+    # bll's own apply treats a missing ENV as the current
+    # environment. The symbolic evaluator's current environment is a
+    # symbol table with no bll value form, so both operands are
+    # required here, and the compiler enforces the same arity.
+    #
+    # state structure, mirroring bll's fn_apply:
+    #   0 args: nil
+    #   1 arg: Cons( nil, PROG )
+    #   2 args: Cons( 1, Cons( ENV, PROG ) )
+
+    @classmethod
+    def step(cls, state : Element, args : Element, env : Any, workitem : Any) -> None:
+        if args.is_nil():
+            args.deref()
+            env.deref()
+            if not isinstance(state, Cons):
+                assert state.is_nil()
+                state.deref()
+                workitem.error("a: requires a program and an environment")
+                return
+            i, info = state.steal_children()
+            if i.is_nil():
+                Element.deref_all(i, info)
+                workitem.error("a: requires a program and an environment")
+                return
+            assert i.is_atom() and i.val2 == b'\x01'
+            i.deref()
+            bllenv, prog = info.steal_children()
+            # The program runs on bll's machinery, but it is stepped
+            # here rather than handed to bll.eval so the symbolic
+            # evaluator's own guards stay active: every nested step
+            # charges the step allowance and the allocation cap is
+            # checked between steps, so a looping or allocation heavy
+            # program aborts instead of hanging the evaluator. The
+            # bll result gate rejects programs that are not bll
+            # values, so an Error result is delivered like any other.
+            sub = BLLWorkItem.begin(prog, bllenv, workitem.budget)
+            while not sub.finished() and not sub.budget.exhausted:
+                sub.step()
+                workitem.costleft -= 1
+                if workitem.costleft <= 0:
+                    sub.unwind()
+                    workitem.error("cost overrun, aborting")
+                    return
+                if ALLOCATOR.x > 400000:
+                    sub.unwind()
+                    workitem.error("memory overrun, aborting")
+                    return
+            if sub.budget.exhausted:
+                sub.unwind()
+                workitem.fin_value(Error("budget exhausted"))
+            else:
+                workitem.fin_value(sub.get_result())
+        elif isinstance(args, Cons):
+            arg, rest = args.steal_children()
+            workitem.new_continuation(Func(cls, None, state), rest, env)
+            workitem.eval_arg(arg, env.bumpref())
+        else:
+            env.deref()
+            Element.deref_all(state, args)
+            workitem.error("argument to a is improper list")
+
+    @classmethod
+    def feedback(cls, state : Element, value : Element, args : Element, env : Any, workitem : Any) -> None:
+        assert not isinstance(value, Error)
+
+        if not isinstance(state, Cons):
+            assert state.is_nil()
+            newst = Cons(state, value)
+        else:
+            left, prog_el = state.steal_children()
+            if left.is_nil():
+                left.deref()
+                newst = Cons(Atom(1), Cons(value, prog_el))
+            else:
+                # env is a symbol table, not an Element, so it takes
+                # its own deref
+                env.deref()
+                Element.deref_all(left, prog_el, value, args)
+                workitem.error("too many args to apply")
+                return
+
+        workitem.new_continuation(Func(cls, None, newst), args, env)
+
 @dataclass
 class Continuation:
     fn: Func
@@ -578,6 +675,16 @@ def compile_expr(sexpr, globalidx, localidx):
                 return SExpr.list_to_element([OpAtom("a"), i_expr])
             else:
                 raise Exception("invalid if expression")
+        elif symname == "a":
+            # The symbolic evaluator requires both operands, so the
+            # compiled form does too, even though bll's apply would
+            # default a missing environment.
+            args = sexpr.val2
+            if not (isinstance(args, Cons) and isinstance(args.val2, Cons)
+                    and args.val2.val2.is_nil()):
+                raise Exception("a requires a program and an environment")
+            l = compile_args(args, globalidx, localidx)
+            return Cons(OpAtom('a'), l)
         elif symname == "partial":
             args = sexpr.val2
             if not isinstance(args, Cons):

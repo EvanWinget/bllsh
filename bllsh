@@ -26,7 +26,7 @@ import verystable.core.messages
 # Todo:
 #
 #  * implement "softfork"
-#  * make "blleval" / "apply" available in symbll
+#  * make "blleval" available in symbll
 #  * misc additional opcodes
 #
 #  * add support for "@SYM" to mean SYM turned into a bll program in general?

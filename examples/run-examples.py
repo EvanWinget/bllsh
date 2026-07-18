@@ -38,6 +38,7 @@ CORPUS = [
     "examples/test-vault",
     "examples/test-flexmarks",
     "examples/test-flexmarks-htlc",
+    "examples/test-p2-delegated",
 ]
 
 MARKER = "; expect:"
