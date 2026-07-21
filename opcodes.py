@@ -1259,9 +1259,11 @@ class op_tx(BinOpcode):
         # Selector 9 replaces the accumulator with a fresh
         # (leafver . sign) pair, three element objects charged
         # before the dispatch builds them. The charge rides the
-        # selector alone, so the unset-context and unavailable-info
-        # paths overpay it, the safe direction, and the pair's
-        # interned small encodings do too.
+        # selector alone: the pair's interned small encodings
+        # overpay it, the safe direction, and on the unset-context
+        # paths this implementation still crashes past it (the
+        # recorded tx crash family), where the mirror overpays and
+        # errors cleanly.
         if code == 9 and which is None:
             if not budget.charge(3 * costs.ELEMENT_ALLOC):
                 return None

@@ -103,6 +103,11 @@ class fn_partial(FuncClass):
             if state.is_nil():
                 workitem.error("partial: requires opcode argument")
             else:
+                # The wrapper Func is dispatch bookkeeping this
+                # implementation needs around the already-charged
+                # binding, not a second program value, so it is
+                # uncharged: the C++ mirror delivers the binding
+                # element itself here and constructs nothing.
                 workitem.fin_value(Func(cls, None, state))
         elif isinstance(args, Cons):
             arg, rest = args.steal_children()

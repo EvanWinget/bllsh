@@ -143,6 +143,19 @@ total("partial/wide-opcode-atom-scan",
       mach(1) + costs.ELEMENT_ALLOC + atom_scan(11),
       want="program result contains a function object")
 
+# each argument fed through partial rebinds a fresh charged function
+# object on top of the wrapped opcode's own fold charges: the exact
+# total pins the per-rebind ELEMENT_ALLOC, which no result
+# comparison can see
+total("partial/rebind-charges-per-argument",
+      "(partial (q . 23) (q . 1) (q . 2))",
+      mach(3) + costs.ELEMENT_ALLOC             # the initial binding
+      + 2 * costs.ELEMENT_ALLOC                 # one rebind per fed value
+      + costs.ARITH_ARG + costs.ARITH_PER_BYTE * (0 + 1) + costs.MALLOC_PER_BYTE
+      + costs.ARITH_ARG + costs.ARITH_PER_BYTE * (1 + 1) + costs.MALLOC_PER_BYTE,
+      want="program result contains a function object")
+replay("replay/rebind-charge-boundary", "(partial (q . 23) (q . 1) (q . 2))")
+
 
 # ---- the result gate ----
 
