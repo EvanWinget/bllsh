@@ -98,9 +98,15 @@ close-out the same way as the earlier logs. Unit 1 recorded
    message that is not a bip342_txmsg transaction hash is hashed
    with TAGHASH under a per-application tag with the spent outpoint
    appended, bll/delegate for the delegation port. The tag
-   separates protocols, and the outpoint binds the network in
-   practice, since an outpoint recurs on another chain only if its
-   entire funding ancestry recurs there. An application needing
-   unconditional separation commits a network identifier of its
-   own. Goes into the SPEC section 7 draft at unit 3 as a
-   convention of the corpus, not a consensus rule.
+   separates protocols, and the outpoint binds the network only as
+   far as funding ancestries differ, since an outpoint recurs on
+   another chain exactly when its entire funding ancestry recurs
+   there. That is a real bound between mainnet-class chains and a
+   weak one between twin test networks: coinbase txids do not
+   commit to a signet's challenge, the block signature rides the
+   coinbase witness, so two custom signets mined to the same script
+   at the same heights can share early ancestries. A deployment on
+   such chains commits a network identifier of its own, as does any
+   application needing unconditional separation. Goes into the SPEC
+   section 7 draft at unit 3 as a convention of the corpus, not a
+   consensus rule, with the twin network caveat stated.

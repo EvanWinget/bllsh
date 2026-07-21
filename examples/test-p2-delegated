@@ -39,10 +39,15 @@
 ;      outpoint, and the genesis challenge's two jobs are covered
 ;      separately: the tagged hash keeps any other protocol's signed
 ;      messages from colliding with this one, and the outpoint binds
-;      the network in practice, since it recurs on another chain only
-;      if its entire funding ancestry recurs there. An application
-;      needing unconditional network separation commits a network
-;      identifier of its own. The signature itself is an explicit
+;      the network only as far as funding ancestries differ, since
+;      it recurs on another chain exactly when its whole funding
+;      ancestry recurs there. Distinct ancestries hold between
+;      mainnet-class chains but not between twin test networks,
+;      where coinbase txids do not commit to a signet's challenge
+;      and early ancestries can coincide, so a deployment on such
+;      chains commits a network identifier of its own, as does any
+;      application needing unconditional separation. The signature
+;      itself is an explicit
 ;      argument, where Chia carries it in the spend bundle's BLS
 ;      aggregate.
 ;   3. The delegate does not return a conditions list for the
