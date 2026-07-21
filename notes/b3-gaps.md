@@ -65,7 +65,15 @@ close-out the same way as the earlier logs. Unit 1 recorded
    key, a second leaf). Design consequence for the layout: the
    introspection surface pinned in A2, fields 7 and 8, turned out to
    be exactly sufficient for covenant exclusivity, and no chain
-   level "this output is exclusive" flag is needed.
+   level "this output is exclusive" flag is needed. One scope note:
+   the inference is sound only where BIP341 validation checked the
+   control block, so SOLELEAF is meaningful under the spend command
+   and reads unchecked witness bytes under the legacy setter
+   harness. A setter context without a script path control block
+   also lands on the oracle's known crash shape in the shared
+   bip341 classifier, the recorded tx introspection divergence,
+   which the spend command's stack validation makes unreachable
+   from a real spend.
 
 4. **The compiler embeds the whole symbol table, so committed bytes
    are a function of every def in scope and their insertion order.**
@@ -77,20 +85,22 @@ close-out the same way as the earlier logs. Unit 1 recorded
    generator recompiles it and validates every spend before
    emitting, and the program marker fails the example runner on any
    drift. Two findings for later tooling: unused library defs ride
-   into committed programs and cost witness weight, and any future
-   dead-def elimination is a committed-bytes-changing compiler
-   choice that must be bit-for-bit deterministic across
+   into committed programs and cost witness weight (the recommitted
+   singleton pays roughly 300 bytes of its roughly 2000 byte leaf
+   for the taproot reconstruction defs it never calls), and any
+   future dead-def elimination is a committed-bytes-changing
+   compiler choice that must be bit-for-bit deterministic across
    implementations before a corpus adopts it.
 
 5. **Explicit-message signatures adopt a tagged hash discipline, and
    the model exposes no chain identity** (decided 2026-07-20, Evan).
-   The corpus convention: a message that is not a bip342_txmsg
-   transaction hash is hashed with the lib-taproot TAGHASH under a
-   per-application tag, bll/delegate for the delegation port. The
-   tag separates protocols, and the outpoint already present in
-   such messages binds the network in practice, since an outpoint
-   recurs on another chain only if its entire funding ancestry
-   recurs there. An application needing unconditional separation
-   commits a network identifier of its own. Goes into the SPEC
-   section 7 draft at unit 3 as a convention of the corpus, not a
-   consensus rule.
+   The corpus convention, carried by lib-taproot's SIGNMSG: a
+   message that is not a bip342_txmsg transaction hash is hashed
+   with TAGHASH under a per-application tag with the spent outpoint
+   appended, bll/delegate for the delegation port. The tag
+   separates protocols, and the outpoint binds the network in
+   practice, since an outpoint recurs on another chain only if its
+   entire funding ancestry recurs there. An application needing
+   unconditional separation commits a network identifier of its
+   own. Goes into the SPEC section 7 draft at unit 3 as a
+   convention of the corpus, not a consensus rule.

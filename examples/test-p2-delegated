@@ -32,8 +32,8 @@
 ;      ORIGPK is kept as a parameter and any nonzero value is refused,
 ;      recording the unported branch in the program.
 ;   2. AGG_SIG_ME becomes bip340_verify over an explicit message, the
-;      delegate's tree hash bound to the spent outpoint via (tx 11)
-;      and (tx 12) under the bll/delegate tagged hash, the corpus
+;      delegate's tree hash bound to the spent outpoint under the
+;      bll/delegate tagged hash through SIGNMSG, the corpus
 ;      convention for explicit-message signatures. Chia appends the
 ;      coin id and a genesis challenge. The coin id becomes the
 ;      outpoint, and the genesis challenge's two jobs are covered
@@ -101,7 +101,7 @@ def (SHA256TREE T) (if (l T) (sha256 2 (SHA256TREE (h T)) (SHA256TREE (t T))) (s
 ; ORIGPK branch is the unported hidden puzzle half. The signature
 ; check raises on a bad signature and the delegate raises or returns
 ; nil on refusal, so all is safe even though it is eager.
-def (P2D SYNPK ORIGPK DELEG ARGS SIG) (if ORIGPK (x "p2d: hidden path not ported") (if (all (bip340_verify SYNPK (TAGHASH "bll/delegate" (cat (SHA256TREE DELEG) (tx 11) (tx 12))) SIG) (a DELEG ARGS)) 1 (x "p2d: delegated spend not authorized")))
+def (P2D SYNPK ORIGPK DELEG ARGS SIG) (if ORIGPK (x "p2d: hidden path not ported") (if (all (bip340_verify SYNPK (SIGNMSG "bll/delegate" (SHA256TREE DELEG)) SIG) (a DELEG ARGS)) 1 (x "p2d: delegated spend not authorized")))
 
 ; the tree hashes the signatures below commit to, pinned against the
 ; generator's Python computation

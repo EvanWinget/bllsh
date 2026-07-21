@@ -44,7 +44,7 @@ import symbll
 from element import Atom, Cons, SExpr, SerDeser
 from spend import LEAF_VERSION_BLL, verify_spend
 from verystable.core import messages
-from verystable.core.key import TaggedHash, compute_xonly_pubkey, sign_schnorr, tweak_add_pubkey
+from verystable.core.key import H_POINT, TaggedHash, compute_xonly_pubkey, sign_schnorr, tweak_add_pubkey
 from verystable.core.messages import COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, ser_string
 from verystable.core.script import LEAF_VERSION_TAPSCRIPT, TaprootSignatureHash
 
@@ -78,8 +78,8 @@ def xonly(priv):
     return pub
 
 
-def tapleaf_hash(script):
-    return TaggedHash("TapLeaf", bytes([LEAF_VERSION_TAPSCRIPT]) + ser_string(script))
+def tapleaf_hash(script, leaf_ver=LEAF_VERSION_TAPSCRIPT):
+    return TaggedHash("TapLeaf", bytes([leaf_ver]) + ser_string(script))
 
 
 def tapbranch(a, b):
@@ -331,9 +331,9 @@ def p2d_sig_for(priv, treehash, tx):
     """The AGG_SIG_ME analogue: a signature over the delegate's tree
     hash bound to the spent outpoint under the bll/delegate tagged
     hash, matching the example's
-    (TAGHASH "bll/delegate" (cat (SHA256TREE DELEG) (tx 11) (tx 12))).
-    The transaction's outputs are deliberately not covered, only the
-    delegate is."""
+    (SIGNMSG "bll/delegate" (SHA256TREE DELEG)) built on
+    lib-taproot's signing convention. The transaction's outputs are
+    deliberately not covered, only the delegate is."""
     prevout = tx.vin[0].prevout
     msg = TaggedHash("bll/delegate",
                      treehash
@@ -394,16 +394,16 @@ REGION_BEGIN = "; --- committed program ---"
 REGION_END = "; --- end committed program ---"
 
 # the BIP341 unspendable internal key, the x coordinate of a point
-# with no known discrete logarithm, matching UNSPENDABLEIPK in
-# examples/lib-taproot
-UNSPENDABLE_IPK = bytes.fromhex(
-    "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0")
+# with no known discrete logarithm. UNSPENDABLEIPK in
+# examples/lib-taproot carries the same bytes on the bll side.
+UNSPENDABLE_IPK = bytes.fromhex(H_POINT)
 
 
 def compile_committed_region(path, symname):
     """Compile SYMNAME from the sentinel delimited def region of an
-    example file, returning the serialized program bytes and the
-    printed compiled form for the example's program marker."""
+    example file, returning the serialized program bytes, the printed
+    compiled form for the example's program marker, and the region's
+    command lines."""
     loader = importlib.machinery.SourceFileLoader("bllsh_repl", "bllsh")
     spec = importlib.util.spec_from_loader("bllsh_repl", loader)
     module = importlib.util.module_from_spec(spec)
@@ -414,17 +414,17 @@ def compile_committed_region(path, symname):
         lines = [ln.strip() for ln in f]
     if REGION_BEGIN not in lines or REGION_END not in lines:
         raise SystemExit(f"{path}: missing the committed program sentinels")
-    region = lines[lines.index(REGION_BEGIN) + 1:lines.index(REGION_END)]
+    region = [line for line in
+              lines[lines.index(REGION_BEGIN) + 1:lines.index(REGION_END)]
+              if line != "" and not line.startswith(";")]
     for line in region:
-        if line == "" or line.startswith(";"):
-            continue
         with contextlib.redirect_stdout(io.StringIO()):
             repl.onecmd(line)
     r = symbll.compile_program(symname, repl.symbols)
     b = SerDeser.Serialize(r)
     s = str(r)
     r.deref()
-    return b, s
+    return b, s, region
 
 
 def gen_singleton():
@@ -434,18 +434,41 @@ def gen_singleton():
     included, so regeneration is a byte comparison against the
     committed file's bottom half."""
     div = "; " + "-" * 67
-    program, prog_str = compile_committed_region("examples/test-singleton",
-                                                 "SINGLETON")
-    leaf = TaggedHash("TapLeaf", bytes([LEAF_VERSION_BLL]) + ser_string(program))
-    spk, parity = taproot_spk(UNSPENDABLE_IPK, leaf, [])
-    cb = bytes([LEAF_VERSION_BLL | parity]) + UNSPENDABLE_IPK
+    program, prog_str, region = compile_committed_region(
+        "examples/test-singleton", "SINGLETON")
+    leaf = tapleaf_hash(program, LEAF_VERSION_BLL)
+
+    def commit(ipk, path):
+        """scriptPubKey and control block committing the program
+        under IPK with PATH sibling hashes beside the leaf."""
+        spk_, parity_ = taproot_spk(ipk, leaf, path)
+        cb_ = bytes([LEAF_VERSION_BLL | parity_]) + ipk + b"".join(path)
+        return spk_, cb_
+
+    spk, cb = commit(UNSPENDABLE_IPK, [])
     dest = p2tr_raw(xonly(KEY_SGL_DEST))
     genesis = messages.ser_uint256(FUNDING_TXID) + struct.pack("<I", 0)
     genesis_alt = messages.ser_uint256(FUNDING_TXID_ALT) + struct.pack("<I", 0)
 
+    # the contrast def is the committed SINGLETON with GENESIS moved
+    # back to a witness argument, derived from the region so it
+    # cannot drift from the def it claims to mirror
+    singleton_defs = [line for line in region
+                      if line.startswith("def (SINGLETON ")]
+    if len(singleton_defs) != 1:
+        raise SystemExit("committed region: expected exactly one SINGLETON def")
+    arg_def = singleton_defs[0].replace(
+        "def (SINGLETON ", "def (SINGLETONARG GENESIS ").replace(
+        "(LINEAGE (GENESIS)", "(LINEAGE GENESIS")
+    if "def (SINGLETONARG GENESIS " not in arg_def or "(LINEAGE GENESIS " not in arg_def:
+        raise SystemExit("committed region: the SINGLETON def changed shape,"
+                         " update the SINGLETONARG rewrite")
+
     err_invalid = "invalid: Exception: 0x" + b"singleton: invalid spend".hex()
     err_second = "invalid: Exception: 0x" + b"singleton: second odd output".hex()
     err_sig = "invalid: bip340_verify: invalid, non-empty signature"
+    err_eval_invalid = ("ERR(Exception: 0x"
+                        + b"singleton: invalid spend".hex() + ")")
 
     def proof(tx):
         return tx.serialize_without_witness()
@@ -462,9 +485,13 @@ def gen_singleton():
         return sig_for_at(KEY_SGL_INNER, tx, utxos, program, 0,
                           leaf_ver=LEAF_VERSION_BLL)
 
-    def sgl_spend(tx, utxos, sig, p1, p2, pidx, expect, cb_=cb):
+    def sgl_spend(tx, utxos, p1, p2, pidx, expect, sig=None, cb_=cb):
         """Set the spend witness, self check the verdict against the
-        real validator, and emit the spend line with its marker."""
+        real validator, and emit the spend line with its marker. The
+        inner signature is computed for the spend itself unless a
+        deliberately foreign one is passed."""
+        if sig is None:
+            sig = sgl_sig(tx, utxos)
         tx.wit.vtxinwit[0].scriptWitness.stack = [envb(sig, p1, p2, pidx),
                                                   program, cb_]
         got = str(verify_spend(tx, 0, utxos))
@@ -522,18 +549,21 @@ def gen_singleton():
     print("; context A: the genesis spend continues the chain, the launch")
     print("; transaction consumed the genesis outpoint and this UTXO is its")
     print("; output 0")
-    sgl_spend(txa, utxoa, siga, proof(fund), b"", b"", "valid")
+    sgl_spend(txa, utxoa, proof(fund), b"", b"", "valid")
     print()
     print("; a proof that does not hash to the actual parent txid is refused,")
     print("; here the proof is this very transaction instead of the parent")
-    sgl_spend(txa, utxoa, siga, proof(txa), b"", b"", err_invalid)
+    sgl_spend(txa, utxoa, proof(txa), b"", b"", err_invalid)
     print()
     print("; the spend derived the introspection context, the executing")
-    print("; program is the committed leaf and its control block carries the")
-    print("; exclusivity SOLELEAF requires")
+    print("; program is the committed leaf, its control block carries the")
+    print("; exclusivity SOLELEAF requires, and the leaf version and parity")
+    print("; bit ride the control block's first byte")
     print(f"blleval (= (tx (q . 6)) (q . 0x{leaf.hex()}))")
     print("; expect: 1")
     print("eval (SOLELEAF)")
+    print("; expect: 1")
+    print(f"eval (all (= (h (tx 9)) {LEAF_VERSION_BLL}) (= (t (tx 9)) {cb[0] & 1}))")
     print("; expect: 1")
     print()
 
@@ -545,27 +575,27 @@ def gen_singleton():
     print("; context B: an ancestry spend continues the chain, the parent")
     print("; transaction spent an odd output at my scriptPubKey, shown by the")
     print("; grandparent reveal")
-    sgl_spend(txb, utxob, sigb, proof(txa), proof(fund), b"", "valid")
+    sgl_spend(txb, utxob, proof(txa), proof(fund), b"", "valid")
     print()
     print("; a non-genesis UTXO cannot claim the genesis branch, the parent")
     print("; did not consume the genesis outpoint")
-    sgl_spend(txb, utxob, sigb, proof(txa), b"", b"", err_invalid)
+    sgl_spend(txb, utxob, proof(txa), b"", b"", err_invalid)
     print()
     print("; the inner program refuses a signature for a different transaction")
-    sgl_spend(txb, utxob, siga, proof(txa), proof(fund), b"", err_sig)
+    sgl_spend(txb, utxob, proof(txa), proof(fund), b"", err_sig, sig=siga)
     print()
     print("; an input index past the parent's input count is refused before")
     print("; it can drive any parsing")
-    sgl_spend(txb, utxob, sigb, proof(txa), proof(fund), b"\x01", err_invalid)
+    sgl_spend(txb, utxob, proof(txa), proof(fund), b"\x01", err_invalid)
     print()
     print("; a non-minimally encoded index is re-encoded before the")
     print("; countdown, 0x00 is index zero, not an atom that never counts")
     print("; down")
-    sgl_spend(txb, utxob, sigb, proof(txa), proof(fund), b"\x00", "valid")
+    sgl_spend(txb, utxob, proof(txa), proof(fund), b"\x00", "valid")
     print()
     print("; a grandparent reveal that does not hash to the parent's prevout")
     print("; txid is never parsed")
-    sgl_spend(txb, utxob, sigb, proof(txa), proof(txb), b"", err_invalid)
+    sgl_spend(txb, utxob, proof(txa), proof(txb), b"", err_invalid)
     print()
 
     txc, utxoc = make_tx2([(txb.sha256, 0, 86001, spk)], [(85000, dest)],
@@ -574,32 +604,28 @@ def gen_singleton():
     print("; context C: a retire spend. The inner signature covers the")
     print("; outputs, so zero odd outputs is a consented retirement of the")
     print("; chain")
-    sgl_spend(txc, utxoc, sgl_sig(txc, utxoc), proof(txb), proof(txa), b"",
-              "valid")
+    sgl_spend(txc, utxoc, proof(txb), proof(txa), b"", "valid")
     print()
 
     txd, utxod = make_tx2([(txb.sha256, 0, 86001, spk)],
                           [(43001, spk), (41001, dest)], program, cb)
     print(div)
     print("; context D: a second odd output would fork the chain")
-    sgl_spend(txd, utxod, sgl_sig(txd, utxod), proof(txb), proof(txa), b"",
-              err_second)
+    sgl_spend(txd, utxod, proof(txb), proof(txa), b"", err_second)
     print()
 
     txe, utxoe = make_tx2([(txb.sha256, 0, 86001, spk)], [(85001, dest)],
                           program, cb)
     print(div)
     print("; context E: the successor must recreate my scriptPubKey")
-    sgl_spend(txe, utxoe, sgl_sig(txe, utxoe), proof(txb), proof(txa), b"",
-              err_invalid)
+    sgl_spend(txe, utxoe, proof(txb), proof(txa), b"", err_invalid)
     print()
 
     txf, utxof = make_tx2([(txb.sha256, 0, 86000, spk)],
                           [(84001, spk), (1000, dest)], program, cb)
     print(div)
     print("; context F: an even spent amount is not a singleton")
-    sgl_spend(txf, utxof, sgl_sig(txf, utxof), proof(txb), proof(txa), b"",
-              err_invalid)
+    sgl_spend(txf, utxof, proof(txb), proof(txa), b"", err_invalid)
     print()
 
     # a look-alike chain funded from a different outpoint, spending
@@ -609,7 +635,6 @@ def gen_singleton():
     fund_alt.rehash()
     txg, utxog = make_tx2([(fund_alt.sha256, 0, 70001, spk)],
                           [(68001, spk), (1000, dest)], program, cb)
-    txg.rehash()
     sigg = sgl_sig(txg, utxog)
     print(div)
     print("; context G: a look-alike output funded outside the chain. Anyone")
@@ -618,11 +643,11 @@ def gen_singleton():
     print("; outpoint the look-alike's parent never consumed. The exclusion")
     print("; is unconditional, the contrast section at the end shows the")
     print("; uncommitted variant accepting this same transaction")
-    sgl_spend(txg, utxog, sigg, proof(fund_alt), b"", b"", err_invalid)
+    sgl_spend(txg, utxog, proof(fund_alt), b"", b"", err_invalid)
     print()
     print("; and its ancestry claim fails because the revealed grandparent")
     print("; does not hash to the parent's prevout txid")
-    sgl_spend(txg, utxog, sigg, proof(fund_alt), proof(fund), b"", err_invalid)
+    sgl_spend(txg, utxog, proof(fund_alt), proof(fund), b"", err_invalid)
     print()
 
     txh, utxosh = make_tx2([(txb.sha256, 0, 86001, spk),
@@ -631,8 +656,7 @@ def gen_singleton():
     print(div)
     print("; context H: two singleton outputs spent in one transaction, two")
     print("; chains cannot merge through one successor")
-    sgl_spend(txh, utxosh, sgl_sig(txh, utxosh), proof(txb), proof(txa), b"",
-              err_invalid)
+    sgl_spend(txh, utxosh, proof(txb), proof(txa), b"", err_invalid)
     print()
 
     txi, utxoi = make_tx2([(txb.sha256, 0, 86001, spk)],
@@ -641,8 +665,7 @@ def gen_singleton():
     print("; context I: the successor sits at a nonzero output index, found")
     print("; by the scan rather than assumed, pinning ODDSCAN's index plus")
     print("; one encoding at an index above zero")
-    sgl_spend(txi, utxoi, sgl_sig(txi, utxoi), proof(txb), proof(txa), b"",
-              "valid")
+    sgl_spend(txi, utxoi, proof(txb), proof(txa), b"", "valid")
     print()
 
     # a launch variant with two odd outputs at the singleton
@@ -660,8 +683,7 @@ def gen_singleton():
     print("; this output is odd at the singleton scriptPubKey, but only")
     print("; output 0 may claim the genesis branch, so the (tx 12) index rule")
     print("; is the check that refuses")
-    sgl_spend(txj, utxoj, sgl_sig(txj, utxoj), proof(fund2), b"", b"",
-              err_invalid)
+    sgl_spend(txj, utxoj, proof(fund2), b"", b"", err_invalid)
     print()
 
     # the same committed leaf without the exclusivity the induction
@@ -669,8 +691,7 @@ def gen_singleton():
     # the tree for context L. Both launches consume the genesis
     # outpoint, mutually exclusive hypotheticals like C through I.
     ipk_ord = xonly(KEY_SGL_IPK)
-    spk_k, parity_k = taproot_spk(ipk_ord, leaf, [])
-    cb_k = bytes([LEAF_VERSION_BLL | parity_k]) + ipk_ord
+    spk_k, cb_k = commit(ipk_ord, [])
     fund_k, _ = make_tx(dest, [(60001, spk_k), (38998, dest)], 0xffffffff, 0,
                         program, cb_k)
     fund_k.rehash()
@@ -681,15 +702,13 @@ def gen_singleton():
     print("; key. The genesis claim holds, so the internal key half of")
     print("; SOLELEAF is the check that refuses: a key path could spend this")
     print("; output around the covenant")
-    sgl_spend(txk, utxok, sgl_sig(txk, utxok), proof(fund_k), b"", b"",
-              err_invalid, cb_=cb_k)
+    sgl_spend(txk, utxok, proof(fund_k), b"", b"", err_invalid, cb_=cb_k)
     print("eval (SOLELEAF)")
     print("; expect: nil")
     print()
 
     sibling = tapleaf_hash(b"bll: sibling leaf")
-    spk_l, parity_l = taproot_spk(UNSPENDABLE_IPK, leaf, [sibling])
-    cb_l = bytes([LEAF_VERSION_BLL | parity_l]) + UNSPENDABLE_IPK + sibling
+    spk_l, cb_l = commit(UNSPENDABLE_IPK, [sibling])
     fund_l, _ = make_tx(dest, [(50001, spk_l), (48998, dest)], 0xffffffff, 0,
                         program, cb_l)
     fund_l.rehash()
@@ -700,10 +719,29 @@ def gen_singleton():
     print("; genesis claim holds, so the merkle path half of SOLELEAF is the")
     print("; check that refuses: a sibling leaf could spend this output")
     print("; around the covenant")
-    sgl_spend(txl, utxol, sgl_sig(txl, utxol), proof(fund_l), b"", b"",
-              err_invalid, cb_=cb_l)
+    sgl_spend(txl, utxol, proof(fund_l), b"", b"", err_invalid, cb_=cb_l)
     print("eval (SOLELEAF)")
     print("; expect: nil")
+    print()
+
+    # the differential section: the same defs the committed bytes
+    # compile from, evaluated through the symbolic evaluator
+    print(div)
+    print("; the symbolic evaluator on the committed defs: context B again,")
+    print("; evaluated through symbll under the legacy setter harness, the")
+    print("; differential against the compiled spend lines above")
+    print()
+    print(f"def PROOFA 0x{proof(txa).hex()}")
+    print(f"def SIGB 0x{sigb.hex()}")
+    print()
+    txb.wit.vtxinwit[0].scriptWitness.stack = [envb(sigb, proof(txa),
+                                                    proof(fund), b""),
+                                               program, cb]
+    emit_context2("context B under the legacy setter harness", txb, utxob,
+                  program)
+    print("; the ancestry spend accepts symbolically as it did compiled")
+    print("eval (SINGLETON (SIGB) (PROOFA) (PROOFGEN) 0)")
+    print("; expect: 1")
     print()
 
     # the contrast section: the look-alike under the legacy setter
@@ -711,17 +749,14 @@ def gen_singleton():
     print(div)
     print("; the contrast: context G under the earlier port's shape.")
     print("; SINGLETONARG is the committed program with GENESIS moved back to")
-    print("; a witness argument, so the spender names a genesis of their own")
-    print("; choosing and the look-alike transaction validates. The spend")
-    print("; command line that follows re-refuses the same transaction under")
-    print("; the committed layout, the binding that quoting constants into")
-    print("; the committed program body exists to provide.")
+    print("; a witness argument, derived from the committed region by the")
+    print("; generator, so the spender names a genesis of their own choosing")
+    print("; and the look-alike transaction validates. The spend command")
+    print("; line at the end re-refuses the same transaction under the")
+    print("; committed layout, the binding that quoting constants into the")
+    print("; committed program body exists to provide.")
     print()
-    print("def (SINGLETONARG GENESIS IARGS PROOF PROOF2 PIDX)"
-          " (if (all (ODD8 (tx 15)) (SOLELEAF)"
-          " (LINEAGE GENESIS PROOF PROOF2 PIDX) (INSCAN 0 (tx 2))"
-          " (CONT2 (ODDSCAN 0 (tx 3) 0)) (a (INNER) IARGS)) 1"
-          " (x \"singleton: invalid spend\"))")
+    print(arg_def)
     print()
     print("; the genesis outpoint the look-alike chain descends from")
     print(f"def GENESISALT 0x{genesis_alt.hex()}")
@@ -730,19 +765,27 @@ def gen_singleton():
     print()
     txg.wit.vtxinwit[0].scriptWitness.stack = [envb(sigg, proof(fund_alt),
                                                     b"", b""), program, cb]
-    print("; the look-alike transaction under the legacy setter harness")
-    print(f"tx {txg.serialize_with_witness().hex()}")
-    print("tx_in_idx 0")
-    print(f"tx_script {program.hex()}")
-    print("utxos " + " ".join(u.serialize().hex() for u in utxog))
+    emit_context2("the look-alike transaction under the legacy setter harness",
+                  txg, utxog, program)
+    print("; this setter context is self consistent: the committed leaf, the")
+    print("; control block and the spent scriptPubKey satisfy the BIP341")
+    print("; equation, which the spend command verifies itself and this")
+    print("; harness does not, and the muladd raises on a mismatch")
+    print("eval (TAPROOT (t (tx 9)) (tx 6) (tx 8) (tx 7) (CHECKTAPSPK (tx 16)))")
+    print("; expect: 1")
     print()
     print("; the spender-named genesis validates under the setter harness")
     print("eval (SINGLETONARG (GENESISALT) (SIGLOOK) (PROOFALT) 0 0)")
     print("; expect: 1")
     print()
-    print("; the same transaction under the spend command, refused by the")
-    print("; committed GENESIS")
-    sgl_spend(txg, utxog, sigg, proof(fund_alt), b"", b"", err_invalid)
+    print("; while the committed program refuses the same context, GENESIS")
+    print("; is not the spender's to name")
+    print("eval (SINGLETON (SIGLOOK) (PROOFALT) 0 0)")
+    print(f"; expect: {err_eval_invalid}")
+    print()
+    print("; and the same transaction under the spend command is refused by")
+    print("; the committed GENESIS")
+    sgl_spend(txg, utxog, proof(fund_alt), b"", b"", err_invalid, sig=sigg)
 
 
 def serialize_bll(src):
@@ -779,7 +822,7 @@ def gen_commitment():
     ipk = xonly(KEY_CMT_IPK)
     src = f"(bip340_verify (q . 0x{pub.hex()}) (bip342_txmsg) 1)"
     program = serialize_bll(src)
-    leaf = TaggedHash("TapLeaf", bytes([LEAF_VERSION_BLL]) + ser_string(program))
+    leaf = tapleaf_hash(program, LEAF_VERSION_BLL)
     spk, parity = taproot_spk(ipk, leaf, [])
     cb = bytes([LEAF_VERSION_BLL | parity]) + ipk
 
@@ -832,14 +875,43 @@ def gen_commitment():
     print(f"spend 0 {txe.serialize_with_witness().hex()} {utxoe.serialize().hex()}")
 
 
+def check_singleton():
+    """Compare the generator's singleton output against the example
+    file's generated half, everything after the program marker line,
+    which the file header records as verbatim generator output."""
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        gen_singleton()
+    with open("examples/test-singleton") as f:
+        content = f.read()
+    marker = "program SINGLETON\n"
+    committed = content[content.index(marker) + len(marker):]
+    if committed != out.getvalue():
+        print("examples/test-singleton: the generated half differs from the"
+              " committed file, regenerate and paste", file=sys.stderr)
+        return 1
+    print("examples/test-singleton: generated half matches")
+    return 0
+
+
 def main():
     targets = {"vault": gen_vault, "flexmarks": gen_flexmarks, "htlc": gen_htlc,
                "p2d": gen_p2d, "singleton": gen_singleton,
                "commitment": gen_commitment}
-    if len(sys.argv) != 2 or sys.argv[1] not in targets:
-        print(f"usage: {sys.argv[0]} {{vault|flexmarks|htlc|p2d|singleton|commitment}}", file=sys.stderr)
+    args = sys.argv[1:]
+    check = args and args[-1] == "--check"
+    if check:
+        args = args[:-1]
+    if len(args) != 1 or args[0] not in targets:
+        print(f"usage: {sys.argv[0]} {{vault|flexmarks|htlc|p2d|singleton|commitment}} [--check]", file=sys.stderr)
         return 1
-    targets[sys.argv[1]]()
+    if check:
+        if args[0] != "singleton":
+            print("--check compares a whole generated file half, which only"
+                  " the singleton target emits", file=sys.stderr)
+            return 1
+        return check_singleton()
+    targets[args[0]]()
     return 0
 
 
