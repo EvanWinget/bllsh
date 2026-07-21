@@ -4,7 +4,8 @@ Findings from implementing the commitment and witness layout glue
 (spend.py, the repl's spend command, and the test-commitment
 example), recorded as the work surfaces them and routed at B3
 close-out the same way as the earlier logs. Unit 1 recorded
-2026-07-18.
+2026-07-18, unit 2 (the singleton under the real layout) recorded
+2026-07-20.
 
 ## The signature message
 
@@ -48,3 +49,48 @@ close-out the same way as the earlier logs. Unit 1 recorded
    byte to the live count before evaluation starts, and those
    elements are already priced through the decode charges, so the
    cap analysis that rides on allocation charges covers them.
+
+## The singleton under the real layout
+
+3. **Commitment exclusivity is expressible from inside evaluation
+   with no new rule.** The singleton's induction needs the spent
+   scriptPubKey spendable only through the executing leaf. BIP341
+   validation already verified the control block against the spent
+   output, so the program only has to inspect what that control
+   block revealed: `(tx 8)` empty means a single leaf tree and
+   `(tx 7)` equal to the BIP341 unspendable internal key means no
+   key path. The vetted copy is SOLELEAF beside UNSPENDABLEIPK in
+   examples/lib-taproot, the recommitted singleton enforces it, and
+   its contexts pin each half refusing alone (an ordinary internal
+   key, a second leaf). Design consequence for the layout: the
+   introspection surface pinned in A2, fields 7 and 8, turned out to
+   be exactly sufficient for covenant exclusivity, and no chain
+   level "this output is exclusive" flag is needed.
+
+4. **The compiler embeds the whole symbol table, so committed bytes
+   are a function of every def in scope and their insertion order.**
+   compile_program folds the full table into the emitted program,
+   used or not, which makes the committed leaf's bytes depend on the
+   def region as a whole rather than on the entry symbol's call
+   graph. The corpus pins reproducibility structurally: the example
+   file's sentinel delimited def region is the single input, the
+   generator recompiles it and validates every spend before
+   emitting, and the program marker fails the example runner on any
+   drift. Two findings for later tooling: unused library defs ride
+   into committed programs and cost witness weight, and any future
+   dead-def elimination is a committed-bytes-changing compiler
+   choice that must be bit-for-bit deterministic across
+   implementations before a corpus adopts it.
+
+5. **Explicit-message signatures adopt a tagged hash discipline, and
+   the model exposes no chain identity** (decided 2026-07-20, Evan).
+   The corpus convention: a message that is not a bip342_txmsg
+   transaction hash is hashed with the lib-taproot TAGHASH under a
+   per-application tag, bll/delegate for the delegation port. The
+   tag separates protocols, and the outpoint already present in
+   such messages binds the network in practice, since an outpoint
+   recurs on another chain only if its entire funding ancestry
+   recurs there. An application needing unconditional separation
+   commits a network identifier of its own. Goes into the SPEC
+   section 7 draft at unit 3 as a convention of the corpus, not a
+   consensus rule.

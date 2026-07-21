@@ -54,7 +54,13 @@ p2_delegated_puzzle_or_hidden_puzzle) recorded 2026-07-18. Unit 2
    over the same outpoint on another network would validate there
    too. Design input for the witness model work: whether corpus
    signing messages should carry a network tag, or adopt a tagged
-   hash discipline like BIP340's challenge derivation.
+   hash discipline like BIP340's challenge derivation. Resolved at
+   B3 unit 2 (2026-07-20, Evan): the tagged hash discipline, no
+   chain identity in the model. The delegation message is now
+   TAGHASH under the bll/delegate tag, the outpoint carries the
+   practical network binding, and an application needing
+   unconditional separation commits a network identifier of its own.
+   The convention is b3-gaps item 5.
 
 ## The source puzzle itself
 
@@ -155,7 +161,13 @@ p2_delegated_puzzle_or_hidden_puzzle) recorded 2026-07-18. Unit 2
     internal key. Consensus finding for the commitment layout design:
     a recommitment covenant is only as strong as the commitment's
     exclusivity, the layout should give programs a way to know or
-    force it.
+    force it. Resolved at B3 unit 2: the pattern is expressible with
+    no new rule, an empty `(tx 8)` and `(tx 7)` equal to the BIP341
+    unspendable internal key, since BIP341 validation already
+    verified the control block against the spent scriptPubKey.
+    SOLELEAF in examples/lib-taproot is the vetted copy, the
+    recommitted singleton enforces it, and its contexts pin each
+    half refusing alone. The finding is b3-gaps item 3.
 
 13. **Nothing commits the argument tree, and for the singleton that
     means neither INNER nor GENESIS.** The singleton takes its own
@@ -173,6 +185,15 @@ p2_delegated_puzzle_or_hidden_puzzle) recorded 2026-07-18. Unit 2
     program in the leaf with its constants quoted inside restores the
     same property by construction. This is the strongest single input
     the corpus has produced for the commitment layout design.
+    Resolved at B3 unit 2: the singleton is committed as a 0xc2 leaf
+    with GENESIS and INNER quoted in the program body, and look-alike
+    exclusion is unconditional. The contrast section of
+    examples/test-singleton shows the same look-alike transaction
+    validating under the argument tree variant and refusing under
+    the committed layout. Inner transitions in the morph sense are
+    deliberately not adopted, the inner program is fixed for the
+    life of the chain and successor identity stays
+    whole-scriptPubKey.
 
 ## The source puzzle itself
 
