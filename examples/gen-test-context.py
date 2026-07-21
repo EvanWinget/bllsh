@@ -329,13 +329,16 @@ def deleg_hash(text):
 
 def p2d_sig_for(priv, treehash, tx):
     """The AGG_SIG_ME analogue: a signature over the delegate's tree
-    hash bound to the spent outpoint, matching the example's
-    (sha256 (SHA256TREE DELEG) (tx 11) (tx 12)). The transaction's
-    outputs are deliberately not covered, only the delegate is."""
+    hash bound to the spent outpoint under the bll/delegate tagged
+    hash, matching the example's
+    (TAGHASH "bll/delegate" (cat (SHA256TREE DELEG) (tx 11) (tx 12))).
+    The transaction's outputs are deliberately not covered, only the
+    delegate is."""
     prevout = tx.vin[0].prevout
-    msg = messages.sha256(treehash
-                          + messages.ser_uint256(prevout.hash)
-                          + struct.pack("<I", prevout.n))
+    msg = TaggedHash("bll/delegate",
+                     treehash
+                     + messages.ser_uint256(prevout.hash)
+                     + struct.pack("<I", prevout.n))
     return sign_schnorr(priv, msg)
 
 

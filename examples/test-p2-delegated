@@ -33,9 +33,16 @@
 ;      recording the unported branch in the program.
 ;   2. AGG_SIG_ME becomes bip340_verify over an explicit message, the
 ;      delegate's tree hash bound to the spent outpoint via (tx 11)
-;      and (tx 12). Chia appends the coin id and a genesis challenge,
-;      here the coin id becomes the outpoint and the genesis challenge
-;      is dropped, a recorded gap. The signature itself is an explicit
+;      and (tx 12) under the bll/delegate tagged hash, the corpus
+;      convention for explicit-message signatures. Chia appends the
+;      coin id and a genesis challenge. The coin id becomes the
+;      outpoint, and the genesis challenge's two jobs are covered
+;      separately: the tagged hash keeps any other protocol's signed
+;      messages from colliding with this one, and the outpoint binds
+;      the network in practice, since it recurs on another chain only
+;      if its entire funding ancestry recurs there. An application
+;      needing unconditional network separation commits a network
+;      identifier of its own. The signature itself is an explicit
 ;      argument, where Chia carries it in the spend bundle's BLS
 ;      aggregate.
 ;   3. The delegate does not return a conditions list for the
@@ -43,9 +50,11 @@
 ;      through tx introspection and returns truthy, and P2D requires
 ;      that result.
 ;   4. The curried SYNTHETIC_PUBLIC_KEY becomes an explicit argument
-;      tree entry. Nothing binds the argument tree before the witness
-;      commitment layout exists, which is a known gap shared by the
-;      whole corpus.
+;      tree entry, unbound under the legacy setter harness this
+;      example still runs in. The commitment layout binds constants
+;      quoted into a committed program body, the shape the singleton
+;      port demonstrates, and moving this example onto that layout is
+;      future corpus work.
 ;   5. Delegates are written in numeric bll opcodes. A quoted tree
 ;      containing symbols is not a bll value, so it cannot be applied
 ;      as a program.
@@ -55,7 +64,8 @@
 ; All hex constants below were produced by
 ;   python3 examples/gen-test-context.py p2d
 ; The delegation signatures commit to the delegate's tree hash and
-; the spent outpoint, nothing else.
+; the spent outpoint under the bll/delegate tagged hash, nothing
+; else.
 ;
 ; Run with
 ;   python3 examples/run-examples.py examples/test-p2-delegated
@@ -64,6 +74,10 @@
 ; Piping the file itself into the repl re-runs each command at every
 ; blank line (cmd.Cmd repeats the last command on an empty input line),
 ; the import command skips blank lines.
+
+; shared taproot helpers, one vetted copy for the whole corpus, here
+; for the TAGHASH signing discipline
+import examples/lib-taproot
 
 ; the value the argument tree carries for the SYNPK parameter, the
 ; key that would be curried into the puzzle on Chia
@@ -87,7 +101,7 @@ def (SHA256TREE T) (if (l T) (sha256 2 (SHA256TREE (h T)) (SHA256TREE (t T))) (s
 ; ORIGPK branch is the unported hidden puzzle half. The signature
 ; check raises on a bad signature and the delegate raises or returns
 ; nil on refusal, so all is safe even though it is eager.
-def (P2D SYNPK ORIGPK DELEG ARGS SIG) (if ORIGPK (x "p2d: hidden path not ported") (if (all (bip340_verify SYNPK (sha256 (SHA256TREE DELEG) (tx 11) (tx 12)) SIG) (a DELEG ARGS)) 1 (x "p2d: delegated spend not authorized")))
+def (P2D SYNPK ORIGPK DELEG ARGS SIG) (if ORIGPK (x "p2d: hidden path not ported") (if (all (bip340_verify SYNPK (TAGHASH "bll/delegate" (cat (SHA256TREE DELEG) (tx 11) (tx 12))) SIG) (a DELEG ARGS)) 1 (x "p2d: delegated spend not authorized")))
 
 ; the tree hashes the signatures below commit to, pinned against the
 ; generator's Python computation
@@ -105,9 +119,9 @@ tx_in_idx 0
 tx_script 626c6c3a207032642064656d6f
 utxos a086010000000000225120cbd9bf4a2e6de4f92206753f18f1ff7c0b71925a058311266041f2c0076b5abf
 
-def SIGANYA 0x568cd2f0a4244d6d9cd7b684fc4c2052ce8027dcd0eac8970b2ada7b48c5c4da45be7ef4e046a9b792ffd5501575005e487b6bf758f5c72e2eb728305d15b7aa
-def SIGCOVA 0x965398b4b647c8210c2cfda1b0f7cbf1fac9c0d02c42a4fe761316e2a2db33eb98f122afa538e0999274a86491ba0462528c940601b5dde7ffe986b67c080aa3
-def SIGARGA 0x86fa420063b170c6b69472cbd3e94bccd68ba8abf23d11ab2c7ca2d5c5d54274fd966277165ea856eec2221dede527edfaaa45fb0741cfe2fa0a7df9b1e201b4
+def SIGANYA 0x7a9e8326c177544777789df16c8579ad52463032762b3a88a530e3428b694a076a8045f3c637d3fdba6acf4fb4784f88ebb8ad02b7714d99253e59643dd90ef7
+def SIGCOVA 0x2e00f98c15db337fd5ab8a6fce0523c947bb0745f0d78f33629cf40286af2c16b20407e21e83318a1ea9dd79e1552c332c62dbc018e81a2ac66e94fd504cbb19
+def SIGARGA 0x2879bef492430362188068bd4646a3215981bd263e5426760d37ef3dd1f302178c8ee91b698024f24b176b60da730d2d2ec80e8c2ee673f8fcee1d64241b13c4
 
 ; the signed allow-anything delegate authorizes the spend
 eval (P2D (SYNPK) 0 (DELEGANY) 0 (SIGANYA))
@@ -140,9 +154,9 @@ eval (P2D (SYNPK) (SYNPK) (DELEGANY) 0 (SIGANYA))
 ; the same two authorized spends through the compiled program, the
 ; environment is the compiler's argument tree
 ; (((SYNPK . ORIGPK) . (DELEG . ARGS)) . SIG)
-blleval @P2D (((0x7a9375ad6167ad54aa74c6348cc54d344cc5dc9487d847049d5eabb0fa03c8fb . 0) . ((0 . 1) . 0)) . 0x568cd2f0a4244d6d9cd7b684fc4c2052ce8027dcd0eac8970b2ada7b48c5c4da45be7ef4e046a9b792ffd5501575005e487b6bf758f5c72e2eb728305d15b7aa)
+blleval @P2D (((0x7a9375ad6167ad54aa74c6348cc54d344cc5dc9487d847049d5eabb0fa03c8fb . 0) . ((0 . 1) . 0)) . 0x7a9e8326c177544777789df16c8579ad52463032762b3a88a530e3428b694a076a8045f3c637d3fdba6acf4fb4784f88ebb8ad02b7714d99253e59643dd90ef7)
 ; expect: 1
-blleval @P2D (((0x7a9375ad6167ad54aa74c6348cc54d344cc5dc9487d847049d5eabb0fa03c8fb . 0) . ((14 (41 (0 . 3)) (0 . 2)) . 0)) . 0x965398b4b647c8210c2cfda1b0f7cbf1fac9c0d02c42a4fe761316e2a2db33eb98f122afa538e0999274a86491ba0462528c940601b5dde7ffe986b67c080aa3)
+blleval @P2D (((0x7a9375ad6167ad54aa74c6348cc54d344cc5dc9487d847049d5eabb0fa03c8fb . 0) . ((14 (41 (0 . 3)) (0 . 2)) . 0)) . 0x2e00f98c15db337fd5ab8a6fce0523c947bb0745f0d78f33629cf40286af2c16b20407e21e83318a1ea9dd79e1552c332c62dbc018e81a2ac66e94fd504cbb19)
 ; expect: 1
 
 ; -------------------------------------------------------------------
@@ -152,7 +166,7 @@ tx_in_idx 0
 tx_script 626c6c3a207032642064656d6f
 utxos a086010000000000225120cbd9bf4a2e6de4f92206753f18f1ff7c0b71925a058311266041f2c0076b5abf
 
-def SIGCOVB 0xebeff9ac0c1522dc5bbcc560e90d5613566ee4c8ca6366a7debe7a816d4ba32a0314f75a2c35bf6994fb0f337671e6789e6b78a6ac98de70c85da0919dcdcc20
+def SIGCOVB 0x0ea73ad060864729b9407b5fdaa79e7ff0bbfe18b275b7b8cd99a90d11e0aad6305fac3d655b3ed665d8fd8ee01edbea4c7e7a90d9fa68fbbb5a4581d8c0fb2d
 
 ; a valid signature does not help when the covenant delegate refuses
 ; the transaction, this spend has one output where it demands two
