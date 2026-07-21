@@ -308,6 +308,12 @@ def verify_spend(tx: CTransaction, input_index: int, spent_outputs: List[CTxOut]
         if program is None:
             return budget_refused()
         if isinstance(program, Error):
+            # A breach latched mid-decode wins over the decode error
+            # in hand, so the verdict is derived from the latch in
+            # every phase and never from a message race.
+            if budget.alloc_breach:
+                program.deref()
+                return budget_refused()
             reason = f"leaf script: {program.val2}"
             program.deref()
             return refused(reason)
@@ -317,6 +323,9 @@ def verify_spend(tx: CTransaction, input_index: int, spent_outputs: List[CTxOut]
             program.deref()
             return budget_refused()
         if isinstance(env, Error):
+            if budget.alloc_breach:
+                Element.deref_all(program, env)
+                return budget_refused()
             reason = f"environment: {env.val2}"
             Element.deref_all(program, env)
             return refused(reason)
@@ -330,7 +339,12 @@ def verify_spend(tx: CTransaction, input_index: int, spent_outputs: List[CTxOut]
         if isinstance(result, Error):
             # The bare message keeps one verdict vocabulary across the
             # phases: a budget latched during decode and one exhausted
-            # during evaluation read identically.
+            # during evaluation read identically. A breach verdict is
+            # derived from the latch here too, not from the error
+            # text, so the vocabulary has one structural source.
+            if budget.alloc_breach:
+                result.deref()
+                return budget_refused()
             reason = result.val2
             result.deref()
             return refused(reason)

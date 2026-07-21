@@ -103,7 +103,14 @@ close-out the same way as the earlier logs. Unit 1 recorded
    The determinism finding stands for any future compiler-level
    dead-def elimination, which this restructuring deliberately is
    not: the region is still embedded whole, it just contains
-   nothing unreachable.
+   nothing unreachable. One bundling residue is left deliberately:
+   lib-taproot still carries the reconstruction defs beside the
+   signing convention, so a future real layout port needing only
+   SIGNMSG would embed four dead defs. Deferred at no cost because
+   the delegation port commits a demo tapscript leaf today, not its
+   compiled program, so no committed bytes pin exists to churn: the
+   signing convention gets its own vetted copy when that migration
+   lands.
 
 5. **Explicit-message signatures adopt a tagged hash discipline, and
    the model exposes no chain identity** (decided 2026-07-20, Evan).

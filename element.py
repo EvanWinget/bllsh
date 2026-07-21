@@ -7,7 +7,10 @@ from typing import Protocol, Type, Any
 
 class Allocator:
     """simple object to monitor how much space is used up by
-       currently allocated objects"""
+       currently allocated objects. The size and effort fields
+       (x, max, limit, effort, effort_limit, over_limit) are
+       unenforced monitoring scaffold: the armed element cap below
+       is the only live limit."""
     def __init__(self):
         self.x = 0
         self.max = 0
@@ -17,8 +20,7 @@ class Allocator:
         self.effort_limit = 100000 #*10000000
         self.counter = 0
         self.freed = dict()
-        self.cap_limit = None
-        self.cap_base = 0
+        self.cap_stop = None
         self.cap_budget = None
 
     def arm_element_cap(self, limit, budget):
@@ -27,16 +29,18 @@ class Allocator:
         and one are excepted because they are constructed once at
         import and reused. On crossing the cap the budget's
         allocation breach latch is set, and the span stays armed so
-        later constructions during the unwind change nothing."""
-        self.cap_limit = limit
-        self.cap_base = self.counter
+        later constructions during the unwind change nothing. Spans
+        do not nest: the counter would be re-based and the earlier
+        span silently lost, so arming while armed asserts."""
+        assert self.cap_budget is None
+        self.cap_stop = self.counter + limit
         self.cap_budget = budget
 
     def disarm_element_cap(self):
         """End the counted span. Outside a span construction is
         uncounted: the repl and the symbolic evaluator run uncapped,
         only the spend driver arms the cap."""
-        self.cap_limit = None
+        self.cap_stop = None
         self.cap_budget = None
 
     def reset_work(self):
@@ -61,7 +65,7 @@ class Allocator:
             frame = frame.f_back
         self.counter += 1
         self.allocated[w] = [n, (self.counter, lines)]
-        if self.cap_limit is not None and self.counter - self.cap_base > self.cap_limit:
+        if self.cap_budget is not None and self.counter > self.cap_stop:
             self.cap_budget.latch_alloc_breach()
 
     def realloc(self, old, new, w):

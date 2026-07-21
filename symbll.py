@@ -445,7 +445,8 @@ class fn_symbll_apply(FuncClass):
             # bll result gate rejects programs that are not bll
             # values, so an Error result is delivered like any other.
             sub = BLLWorkItem.begin(prog, bllenv, workitem.budget)
-            while not sub.finished() and not sub.budget.exhausted:
+            while (not sub.finished() and not sub.budget.exhausted
+                   and not sub.budget.alloc_breach):
                 sub.step()
                 workitem.costleft -= 1
                 if workitem.costleft <= 0:
@@ -456,7 +457,10 @@ class fn_symbll_apply(FuncClass):
                     sub.unwind()
                     workitem.error("memory overrun, aborting")
                     return
-            if sub.budget.exhausted:
+            if sub.budget.alloc_breach:
+                sub.unwind()
+                workitem.fin_value(Error("element allocation limit exceeded"))
+            elif sub.budget.exhausted:
                 sub.unwind()
                 workitem.fin_value(Error("budget exhausted"))
             else:
