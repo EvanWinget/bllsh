@@ -5,6 +5,7 @@ Findings from implementing the commitment and witness layout glue
 example), recorded as the work surfaces them and routed at B3
 close-out the same way as the earlier logs. Unit 1 recorded
 2026-07-18, unit 2 (the singleton under the real layout) recorded
+2026-07-20, unit 3 (sizing and the element cap) recorded
 2026-07-20.
 
 ## The signature message
@@ -49,6 +50,10 @@ close-out the same way as the earlier logs. Unit 1 recorded
    byte to the live count before evaluation starts, and those
    elements are already priced through the decode charges, so the
    cap analysis that rides on allocation charges covers them.
+   Consumed at unit 3: the cap landed as ELEMENT_ALLOCATION_LIMIT
+   in costs.py, a backstop just above the constructions the clamped
+   maximum budget affords, enforced by verify_spend over decode
+   plus evaluation.
 
 ## The singleton under the real layout
 
@@ -90,7 +95,15 @@ close-out the same way as the earlier logs. Unit 1 recorded
    for the taproot reconstruction defs it never calls), and any
    future dead-def elimination is a committed-bytes-changing
    compiler choice that must be bit-for-bit deterministic across
-   implementations before a corpus adopts it.
+   implementations before a corpus adopts it. Resolved at unit 3
+   (2026-07-20, Evan): the exclusivity pair moved to its own vetted
+   copy in examples/lib-exclusivity and the committed region imports
+   only that pair, so the committed singleton fell from 2031 to
+   1678 bytes and now embeds no def its entry point cannot reach.
+   The determinism finding stands for any future compiler-level
+   dead-def elimination, which this restructuring deliberately is
+   not: the region is still embedded whole, it just contains
+   nothing unreachable.
 
 5. **Explicit-message signatures adopt a tagged hash discipline, and
    the model exposes no chain identity** (decided 2026-07-20, Evan).
@@ -110,3 +123,24 @@ close-out the same way as the earlier logs. Unit 1 recorded
    application needing unconditional separation. Goes into the SPEC
    section 7 draft at unit 3 as a convention of the corpus, not a
    consensus rule, with the twin network caveat stated.
+
+## Sizing and the element cap
+
+6. **The cap's counted span is a driver decision, and the two
+   implementations cap different surfaces outside real spends.**
+   verify_spend arms the allocator around decode plus evaluation
+   and disarms before returning, so the repl's eval command, the
+   symbolic evaluator and the debugger run uncapped, which is what
+   keeps interactive work and the differential harness unconstrained
+   by a consensus limit they never approach. The libbll evaluator
+   arms at evaluation entry instead, its spend dispatch layer
+   arriving with the inquisition glue, so between the two
+   implementations the uncapped surfaces differ everywhere except
+   the one place it matters, a validated spend, where both count
+   decode plus evaluation under the same constant. Whether that
+   asymmetry earns a recorded divergence entry is routed to Evan at
+   close-out with the SPEC section 7 draft. One measured point for
+   the repo side sizing analysis: the self application loop, pure
+   machine work, allocates one element per 18.4 charged units, above
+   the provable floor of one per 12 and far below the worst measured
+   retention shape's one per 877.
