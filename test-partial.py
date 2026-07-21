@@ -62,8 +62,9 @@ def errs(name, src, want):
 # a quoted argument costs four: the dispatch, then blleval, the
 # partial dispatch, its quoted argument's four frames counted as
 # three here plus the delivery, the finish step, the FIN frame and
-# the delivery to the receiver.
-PARG = 9 * costs.STEP
+# the delivery to the receiver. The delivered function object is a
+# program value, so its ELEMENT_ALLOC rides on top.
+PARG = 9 * costs.STEP + costs.ELEMENT_ALLOC
 
 
 # ---- the positive surface: bind, pass, apply ----
@@ -124,19 +125,22 @@ errs("partial/rejects-pair", "(partial (q 1 2))",
 # the opcode decode scan: a minimal number is free, a wide
 # non-minimal alias of the same opcode charges every byte, and the
 # threshold sits at machine-integer width: eight bytes scan free,
-# nine charge
+# nine charge. Each successful decode binds one charged function
+# object.
 total("partial/result-gate", "(partial (q . 34))",
-      mach(1), want="program result contains a function object")
+      mach(1) + costs.ELEMENT_ALLOC,
+      want="program result contains a function object")
 total("partial/eight-byte-opcode-alias-scans-free",
       "(partial (q . 0x2200000000000000))",
-      mach(1), want="program result contains a function object")
+      mach(1) + costs.ELEMENT_ALLOC,
+      want="program result contains a function object")
 total("partial/nine-byte-opcode-alias-charges-scan",
       "(partial (q . 0x220000000000000000))",
-      mach(1) + atom_scan(9),
+      mach(1) + costs.ELEMENT_ALLOC + atom_scan(9),
       want="program result contains a function object")
 total("partial/wide-opcode-atom-scan",
       "(partial (q . 0x2200000000000000000000))",
-      mach(1) + atom_scan(11),
+      mach(1) + costs.ELEMENT_ALLOC + atom_scan(11),
       want="program result contains a function object")
 
 

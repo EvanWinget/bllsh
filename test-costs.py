@@ -75,20 +75,24 @@ total("compare/bigeq-shared-walk", "(=== (q 1 2) (q 1 2))",
       mach(2) + 2 * costs.COMPARE_ARG + 5 * costs.BIGEQ_PER_NODE
       + 2 * costs.COMPARE_PER_BYTE)
 total("compare/strlen", "(strlen (q . 0x010203))",
-      mach(1) + costs.STRLEN_ARG)
+      mach(1) + costs.STRLEN_ARG + costs.ELEMENT_ALLOC)
 
 # bytes: cat recopies its state every fold, which is the quadratic
-# self-append pricing, and the and_bytes nil passthrough is free of
-# the size charge
+# self-append pricing, the delivered accumulator's element object is
+# charged flat at finish (the and_bytes nil passthrough overpays it,
+# the safe direction), and the passthrough stays free of the size
+# charge
 BYTE = costs.COPY_PER_BYTE + costs.MALLOC_PER_BYTE
 total("bytes/cat-quadratic", "(cat (q . 0x0102) (q . 0x03) (q . 0x04))",
-      mach(3) + 3 * costs.CAT_ARG + BYTE * ((0 + 2) + (2 + 1) + (3 + 1)))
+      mach(3) + 3 * costs.CAT_ARG + BYTE * ((0 + 2) + (2 + 1) + (3 + 1))
+      + costs.ELEMENT_ALLOC)
 total("bytes/and-nil-passthrough", "(& (q . 0x0102))",
-      mach(1) + costs.BITWISE_ARG)
+      mach(1) + costs.BITWISE_ARG + costs.ELEMENT_ALLOC)
 total("bytes/and-second-fold", "(& (q . 0x0102) (q . 0x03))",
-      mach(2) + 2 * costs.BITWISE_ARG + BYTE * 2)
+      mach(2) + 2 * costs.BITWISE_ARG + BYTE * 2 + costs.ELEMENT_ALLOC)
 total("bytes/xor", "(^ (q . 0x0102) (q . 0x030405))",
-      mach(2) + 2 * costs.BITWISE_ARG + BYTE * 2 + BYTE * 3)
+      mach(2) + 2 * costs.BITWISE_ARG + BYTE * 2 + BYTE * 3
+      + costs.ELEMENT_ALLOC)
 total("bytes/substr-range", "(substr (q . 0x0102030405) (q . 1) (q . 3))",
       mach(3) + 3 * costs.FIX_COLLECT + costs.SUBSTR_BASE + BYTE * 2)
 total("bytes/substr-identity", "(substr (q . 0x010203) (q . 0))",
@@ -97,22 +101,26 @@ total("bytes/substr-past-end-nil", "(substr (q . 0x01) (q . 5))",
       mach(2) + 2 * costs.FIX_COLLECT + costs.SUBSTR_BASE)
 
 # arithmetic: scans over both operands, allocation on the minimal
-# encoding, the sub marker fold base-only with the charged finish
+# encoding, the delivered total's element object charged flat at
+# finish, the sub marker fold base-only with the charged finish
 # negation, mul's divided product term and mod's by-zero error
 # paying the full division charge
 total("arith/add", "(+ (q . 5) (q . 3))",
       mach(2) + 2 * costs.ARITH_ARG
       + costs.ARITH_PER_BYTE * (0 + 1) + costs.MALLOC_PER_BYTE
-      + costs.ARITH_PER_BYTE * (1 + 1) + costs.MALLOC_PER_BYTE)
+      + costs.ARITH_PER_BYTE * (1 + 1) + costs.MALLOC_PER_BYTE
+      + costs.ELEMENT_ALLOC)
 total("arith/sub-negate-finish", "(- (q . 5))",
       mach(1) + costs.ARITH_ARG
-      + costs.ARITH_ARG + costs.ARITH_PER_BYTE * 1 + costs.MALLOC_PER_BYTE)
+      + costs.ARITH_ARG + costs.ELEMENT_ALLOC
+      + costs.ARITH_PER_BYTE * 1 + costs.MALLOC_PER_BYTE)
 total("arith/mul", "(* (q . 0x0102) (q . 0x0304))",
       mach(2) + 2 * costs.ARITH_ARG
       + costs.ARITH_PER_BYTE * (1 + 2) + costs.MULDIV_LIMB_PER_BYTE * 2
       + (1 * 2) // costs.MUL_PRODUCT_DIV + costs.MALLOC_PER_BYTE * 2
       + costs.ARITH_PER_BYTE * (2 + 2) + costs.MULDIV_LIMB_PER_BYTE * 2
-      + (2 * 2) // costs.MUL_PRODUCT_DIV + costs.MALLOC_PER_BYTE * 3)
+      + (2 * 2) // costs.MUL_PRODUCT_DIV + costs.MALLOC_PER_BYTE * 3
+      + costs.ELEMENT_ALLOC)
 total("arith/mod-by-zero-pays-work", "(% (q . 5) (q . 0))",
       mach(2) + 2 * costs.FIX_COLLECT + costs.MOD_BASE
       + costs.MOD_PER_BYTE * (1 + 0) + costs.MULDIV_LIMB_PER_BYTE * 1

@@ -2,7 +2,7 @@
 
 The constants and charging semantics mirror libbll's cost model
 (libbll/src/cost.h in the bll-consensus repository, adopted at its
-commit 34573a0). The values are calibrated there, one cost unit per
+commit 0040e38). The values are calibrated there, one cost unit per
 nanosecond of measured evaluation time on libbll's pinned calibration
 machine, and adopted here verbatim so differential vectors can pin
 exact charged totals across both implementations. They are proposals
@@ -37,12 +37,38 @@ ENV_EDGE = 3
 # that unpacks them.
 FIX_COLLECT = 152
 
+# Allocation cost per byte of atom payload an opcode allocates,
+# charged before the allocation. It prices memory pressure, not
+# time, at CLVM's deployed rate.
+MALLOC_PER_BYTE = 10
+
+# Allocation cost of one element object, charged wherever a
+# construction escapes into a program-reachable value: opcode result
+# atoms and pairs, fold outputs delivered at finish, elements the rd
+# codec decodes, and function objects bound by partial. The
+# reference element layout is 32 bytes, priced at the payload memory
+# rate, so structure memory and payload memory cost the same per
+# byte and the charged floor bounds program-reachable structure at
+# BUDGET_MAX / ELEMENT_ALLOC elements, 224 MB of element objects at
+# the block ceiling, the payload bound's figure. Machine-internal
+# constructions that die with their frame, the apply delivery pair
+# and the fold accumulators each finish consumes, stay covered by
+# the time charges alone, which is what keeps a loop iteration at
+# STEP instead of STEP plus two memory charges.
+ELEMENT_ALLOC = 320
+assert ELEMENT_ALLOC == 32 * MALLOC_PER_BYTE
+
 # Control and list: the flat per-application cost of x, i, h, t and
-# l, charged at finish, the per-argument costs of the rc and b folds,
-# and the per-argument cost of the all, any and notall flag folds.
+# l, charged at finish (their results are borrowed subtrees,
+# interned flags or the terminal error, so no memory charge
+# applies), the per-argument costs of the rc and b folds (one
+# escaping spine or tree cons per argument, so each carries one
+# ELEMENT_ALLOC on top of its measured base), and the per-argument
+# cost of the all, any and notall flag folds, whose states and
+# results are interned flags.
 CONTROL_BASE = 64
-RC_ARG = 64
-B_ARG = 192
+RC_ARG = 64 + ELEMENT_ALLOC
+B_ARG = 192 + ELEMENT_ALLOC
 LOGIC_ARG = 10
 
 # Compare: the per-argument fold base shared by =, <s, < and ===, the
@@ -56,11 +82,6 @@ COMPARE_PER_BYTE = 1
 LT_NUM_PER_BYTE = 3
 BIGEQ_PER_NODE = 10
 STRLEN_ARG = 128
-
-# Allocation cost per byte of atom payload an opcode allocates,
-# charged before the allocation. It prices memory pressure, not
-# time, at CLVM's deployed rate.
-MALLOC_PER_BYTE = 10
 
 # Interpreting an atom as a machine integer scans every byte, since
 # non-minimal encodings carry meaning in their zero tails. Atoms at
@@ -78,11 +99,14 @@ def atom_scan(width):
 
 # Bytes: per-argument fold bases for cat and the bitwise folds, the
 # shared per-byte rate of the copying loops, and substr's finish
-# base.
+# base, which carries the memory charge of the extracted result
+# atom. The cat and bitwise folds charge their delivered
+# accumulator's memory at finish instead, since only the last
+# accumulator escapes.
 CAT_ARG = 96
 COPY_PER_BYTE = 1
 BITWISE_ARG = 160
-SUBSTR_BASE = 64
+SUBSTR_BASE = 64 + ELEMENT_ALLOC
 
 # Arithmetic: the per-argument base of the bignum folds, the per-byte
 # carry-loop rate charged over both operands, the per-limb term
@@ -93,9 +117,9 @@ ARITH_ARG = 160
 ARITH_PER_BYTE = 4
 MULDIV_LIMB_PER_BYTE = 6
 MUL_PRODUCT_DIV = 8
-MOD_BASE = 512
+MOD_BASE = 512 + ELEMENT_ALLOC
 MOD_PER_BYTE = 3
-SHIFT_BASE = 384
+SHIFT_BASE = 384 + ELEMENT_ALLOC
 
 
 def mul_fold_work(left_width, right_width):
@@ -114,7 +138,7 @@ def mul_fold_work(left_width, right_width):
 # constant set covers all four hash opcodes.
 HASH_ARG = 200
 HASH_PER_BYTE = 4
-HASH_BASE = 448
+HASH_BASE = 448 + ELEMENT_ALLOC
 
 # Signatures: one flat verification charge shared by bip340_verify
 # and ecdsa_verify. ECDSA_PARSE prices the pubkey decompression
@@ -125,12 +149,15 @@ SIG_VERIFY = 28000
 ECDSA_PARSE = 4096
 
 # secp256k1_muladd: the fold's shape checks and collection cons per
-# argument, the finish-time setup and combine, and one charge per
-# term decoded in the finish walk, spent inside the walk before each
-# decode. One term is one verification-scale scalar multiplication,
-# priced identically to SIG_VERIFY to keep the sigop parity argument
+# argument (the term list grows one cons per argument and a partial
+# binding can hold the accumulated list live indefinitely, so each
+# argument carries one ELEMENT_ALLOC on top of the measured 96), the
+# finish-time setup and combine, and one charge per term decoded in
+# the finish walk, spent inside the walk before each decode. One
+# term is one verification-scale scalar multiplication, priced
+# identically to SIG_VERIFY to keep the sigop parity argument
 # uniform across both curve opcodes.
-MULADD_ARG = 96
+MULADD_ARG = 96 + ELEMENT_ALLOC
 MULADD_BASE = 3072
 MULADD_PER_TERM = 28000
 
@@ -144,7 +171,7 @@ TX_ARG = 176
 # bip342_txmsg: priced as if every call recomputed the BIP341
 # whole-transaction digests from the serialized bytes, base plus a
 # per-byte rate over transaction plus spent outputs.
-TXMSG_BASE = 3584
+TXMSG_BASE = 3584 + ELEMENT_ALLOC
 TXMSG_PER_BYTE = 8
 
 # Serialize: the codec opcodes charge through their codec loops with
@@ -154,9 +181,9 @@ TXMSG_PER_BYTE = 8
 # charges per element walked plus copy and allocation per emitted
 # byte, headers included.
 RD_BASE = 192
-RD_PER_ELEMENT = 16
+RD_PER_ELEMENT = 16 + ELEMENT_ALLOC
 RD_PER_BYTE = 4
-WR_BASE = 224
+WR_BASE = 224 + ELEMENT_ALLOC
 WR_PER_ELEMENT = 4
 WR_PER_BYTE = 1
 
