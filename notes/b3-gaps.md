@@ -4,7 +4,8 @@ Findings from implementing the commitment and witness layout glue
 (spend.py, the repl's spend command, and the test-commitment
 example), recorded as the work surfaces them and routed at B3
 close-out the same way as the earlier logs. Unit 1 recorded
-2026-07-18.
+2026-07-18, unit 2 (the singleton under the real layout) recorded
+2026-07-20.
 
 ## The signature message
 
@@ -48,3 +49,64 @@ close-out the same way as the earlier logs. Unit 1 recorded
    byte to the live count before evaluation starts, and those
    elements are already priced through the decode charges, so the
    cap analysis that rides on allocation charges covers them.
+
+## The singleton under the real layout
+
+3. **Commitment exclusivity is expressible from inside evaluation
+   with no new rule.** The singleton's induction needs the spent
+   scriptPubKey spendable only through the executing leaf. BIP341
+   validation already verified the control block against the spent
+   output, so the program only has to inspect what that control
+   block revealed: `(tx 8)` empty means a single leaf tree and
+   `(tx 7)` equal to the BIP341 unspendable internal key means no
+   key path. The vetted copy is SOLELEAF beside UNSPENDABLEIPK in
+   examples/lib-taproot, the recommitted singleton enforces it, and
+   its contexts pin each half refusing alone (an ordinary internal
+   key, a second leaf). Design consequence for the layout: the
+   introspection surface pinned in A2, fields 7 and 8, turned out to
+   be exactly sufficient for covenant exclusivity, and no chain
+   level "this output is exclusive" flag is needed. One scope note:
+   the inference is sound only where BIP341 validation checked the
+   control block, so SOLELEAF is meaningful under the spend command
+   and reads unchecked witness bytes under the legacy setter
+   harness. A setter context without a script path control block
+   also lands on the oracle's known crash shape in the shared
+   bip341 classifier, the recorded tx introspection divergence,
+   which the spend command's stack validation makes unreachable
+   from a real spend.
+
+4. **The compiler embeds the whole symbol table, so committed bytes
+   are a function of every def in scope and their insertion order.**
+   compile_program folds the full table into the emitted program,
+   used or not, which makes the committed leaf's bytes depend on the
+   def region as a whole rather than on the entry symbol's call
+   graph. The corpus pins reproducibility structurally: the example
+   file's sentinel delimited def region is the single input, the
+   generator recompiles it and validates every spend before
+   emitting, and the program marker fails the example runner on any
+   drift. Two findings for later tooling: unused library defs ride
+   into committed programs and cost witness weight (the recommitted
+   singleton pays roughly 300 bytes of its roughly 2000 byte leaf
+   for the taproot reconstruction defs it never calls), and any
+   future dead-def elimination is a committed-bytes-changing
+   compiler choice that must be bit-for-bit deterministic across
+   implementations before a corpus adopts it.
+
+5. **Explicit-message signatures adopt a tagged hash discipline, and
+   the model exposes no chain identity** (decided 2026-07-20, Evan).
+   The corpus convention, carried by lib-taproot's SIGNMSG: a
+   message that is not a bip342_txmsg transaction hash is hashed
+   with TAGHASH under a per-application tag with the spent outpoint
+   appended, bll/delegate for the delegation port. The tag
+   separates protocols, and the outpoint binds the network only as
+   far as funding ancestries differ, since an outpoint recurs on
+   another chain exactly when its entire funding ancestry recurs
+   there. That is a real bound between mainnet-class chains and a
+   weak one between twin test networks: coinbase txids do not
+   commit to a signet's challenge, the block signature rides the
+   coinbase witness, so two custom signets mined to the same script
+   at the same heights can share early ancestries. A deployment on
+   such chains commits a network identifier of its own, as does any
+   application needing unconditional separation. Goes into the SPEC
+   section 7 draft at unit 3 as a convention of the corpus, not a
+   consensus rule, with the twin network caveat stated.
