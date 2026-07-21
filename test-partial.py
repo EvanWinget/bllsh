@@ -156,6 +156,18 @@ total("partial/rebind-charges-per-argument",
       want="program result contains a function object")
 replay("replay/rebind-charge-boundary", "(partial (q . 23) (q . 1) (q . 2))")
 
+# finalising a bound b runs its finish rule, whose pending-chain
+# conses charge per finalise: the double-finalise replay pins the
+# exhaustion boundary through the second finalise's finish charges,
+# which a per-argument amortization would not pay again
+same_result("partial/b-shared-finalise-twice",
+            "(a (q rc (q . 0) (partial 1) (partial 1))"
+            " (partial (q . 10) (q . 1) (q . 2)))",
+            "(rc (q . 0) (b (q . 1) (q . 2)) (b (q . 1) (q . 2)))")
+replay("replay/b-shared-finalise-boundary",
+       "(a (q rc (q . 0) (partial 1) (partial 1))"
+       " (partial (q . 10) (q . 1) (q . 2)))")
+
 
 # ---- the result gate ----
 

@@ -479,8 +479,10 @@ class op_b(BinOpcode):
     @classmethod
     def binop(cls, budget, left, right):
         # One charge per argument covers the amortized carry merges
-        # of the binary counter and the finish conses: each pending
-        # subtree consed at finish was pushed by exactly one fold.
+        # of the binary counter, time and merge-cons memory both.
+        # The finish conses charge at finish instead: a shared
+        # binding can run the finish once per finalise, so memory
+        # paid per argument here could be escaped many times there.
         if not budget.charge(costs.B_ARG):
             return None
         if left.is_nil():
@@ -507,6 +509,16 @@ class op_b(BinOpcode):
             l = state.val1.val1.bumpref()
             rest = state.val1.val2
             while rest.is_cons():
+                # Each finish cons escapes into the delivered tree,
+                # and this finish runs once per finalise of a shared
+                # binding over the same unchanged pending chain, so
+                # its memory charge lands here per cons, charged
+                # before the build with early exit, never amortized
+                # into the per-argument constant that a re-finalise
+                # would not pay again.
+                if not budget.charge(costs.ELEMENT_ALLOC):
+                    l.deref()
+                    return None
                 l = Cons(rest.val1.bumpref(), l)
                 rest = rest.val2
             assert rest.is_nil()

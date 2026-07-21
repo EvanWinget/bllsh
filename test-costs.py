@@ -58,7 +58,13 @@ total("control/i", "(i (q . 1) (q . 2) (q . 3))",
 total("control/x-error-charged", "(x)",
       2 * costs.STEP + costs.CONTROL_BASE, want="Exception")
 total("control/rc", "(rc (q . 1) (q . 2))", mach(2) + 2 * costs.RC_ARG)
+# b's finish conses one pending subtree per set bit of the count
+# beyond the first (none for two arguments, one for three, the
+# newest subtree rides the merged slot), each charged at finish
+# since a shared binding re-runs the finish per finalise
 total("control/b", "(b (q . 1) (q . 2))", mach(2) + 2 * costs.B_ARG)
+total("control/b-finish-cons", "(b (q . 1) (q . 2) (q . 3))",
+      mach(3) + 3 * costs.B_ARG + costs.ELEMENT_ALLOC)
 total("logic/all", "(all (q . 1) (q . 1))", mach(2) + 2 * costs.LOGIC_ARG)
 
 # compare: the sticky chains pay the per-argument base even after
