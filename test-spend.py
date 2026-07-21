@@ -342,27 +342,141 @@ case("budget/block-weight-clamp",
                       spend.BUDGET_MAX) == spend.BUDGET_MAX,
               f"BUDGET_MAX {spend.BUDGET_MAX}"))
 
+# ---- the element allocation cap ----
+
+# A self-application loop: the program applies its own environment to
+# itself, so every step is machine work that allocates continuation
+# conses until a limit stops it. Decode builds 11 elements, the loop
+# then allocates without bound, which separates the two phases under
+# a small injected cap.
+P_LOOP = prog("(a (q . (a 1 1)) (q . (a 1 1)))")
+
+
+def with_cap(limit, fn):
+    """Run fn with the spend cap patched to limit, restoring the
+    consensus constant afterwards."""
+    saved = spend.ELEMENT_ALLOCATION_LIMIT
+    spend.ELEMENT_ALLOCATION_LIMIT = limit
+    try:
+        return fn()
+    finally:
+        spend.ELEMENT_ALLOCATION_LIMIT = saved
+
+
+def capspendcase(name, program, env, want, cap):
+    """spendcase under an injected cap value."""
+    def fn():
+        tx, spent = make_spend(program, env)
+        r = with_cap(cap, lambda: spend.verify_spend(tx, 0, spent))
+        return str(r) == want, str(r)
+    case(name, fn)
+
+
+def cap_exact_boundary():
+    """The counted span admits exactly the cap and latches on the
+    next construction, without touching the charge latches."""
+    b = Budget(2**62)
+    ALLOCATOR.arm_element_cap(3, b)
+    els = [Atom(bytes([i + 2])) for i in range(3)]
+    at_cap = not b.alloc_breach and b.charge(0)
+    els.append(Atom(b"\x05"))
+    over = (b.alloc_breach and not b.charge(0) and b.latched
+            and not b.exhausted and not b.guard_breach)
+    ALLOCATOR.disarm_element_cap()
+    Element.deref_all(*els)
+    return at_cap and over, f"breach {b.alloc_breach}"
+case("cap/exact-boundary", cap_exact_boundary)
+
+
+def cap_interned_exempt():
+    """The interned nil and one are constructed once at import, so
+    reusing them costs nothing against the cap."""
+    b = Budget(2**62)
+    warm = [Atom(b""), Atom(b"\x01")]
+    ALLOCATOR.arm_element_cap(0, b)
+    reused = [Atom(b""), Atom(b"\x01"), Atom(b""), Atom(b"\x01")]
+    ok = not b.alloc_breach
+    ALLOCATOR.disarm_element_cap()
+    Element.deref_all(*warm, *reused)
+    return ok, f"breach {b.alloc_breach}"
+case("cap/interned-exempt", cap_interned_exempt)
+
+
+def cap_disarm_restores():
+    """After disarm construction is uncounted again."""
+    b = Budget(2**62)
+    ALLOCATOR.arm_element_cap(0, b)
+    ALLOCATOR.disarm_element_cap()
+    el = Atom(b"\x02")
+    ok = not b.alloc_breach and b.charge(0)
+    el.deref()
+    return ok, f"breach {b.alloc_breach}"
+case("cap/disarm-restores", cap_disarm_restores)
+
+
+def cap_breach_survives_unwind():
+    """clear_allowances drops guard state but not the breach latch,
+    so an unwind cannot launder the cap into a program outcome."""
+    b = Budget(1000)
+    b.push_allowance(100)
+    b.latch_alloc_breach()
+    b.clear_allowances()
+    return (b.alloc_breach and not b.charge(0) and b.latched
+            and not b.guard_breach and not b.exhausted), \
+        f"breach {b.alloc_breach} guard {b.guard_breach}"
+case("cap/breach-survives-unwind", cap_breach_survives_unwind)
+
+
+# A cap below the leaf script's own element count breaches during
+# decode, one the decode fits but the loop crosses breaches during
+# evaluation, and both are named apart from exhaustion.
+capspendcase("cap/decode-breach", P_LOOP, b"\x01",
+             "invalid: element allocation limit exceeded", cap=4)
+capspendcase("cap/eval-breach", P_LOOP, b"\x01",
+             "invalid: element allocation limit exceeded", cap=200)
+
+# A breach inside a softfork guard allowance fails the whole spend:
+# the cap is a resource invariant, not a guarded program outcome the
+# mismatch rule could absorb.
+capspendcase("cap/guard-breach-fatal",
+             prog("(sf (q . 50000) (q . 0) (q a 1 1) (q a 1 1))"),
+             b"\x01", "invalid: element allocation limit exceeded",
+             cap=300)
+
+# Under the real constant the loop exhausts its budget long before
+# the cap: the backstop is unreachable from an admissible spend,
+# which is the relationship the module level assert pins.
+spendcase("cap/exhaustion-first-at-consensus-constant", P_LOOP, b"\x01",
+          "invalid: budget exhausted")
+
+
 # ---- allocator hygiene ----
 
 def no_leaks():
-    """Every verdict path frees what it built."""
+    """Every verdict path frees what it built, the two cap breach
+    phases included (a None cap runs the consensus constant)."""
     leafcheck = prog("(= (tx (q . 6)) 1)")
     tx, spent = make_spend(P_TRUE, b"\x01")
     spend.verify_spend(tx, 0, spent)  # warm the interned atoms
     before = ALLOCATOR.x
-    for program, env, kw in [
-            (P_TRUE, b"\x01", {}),
-            (prog("1"), b"\x80", {}),
-            (prog("(x)"), b"\x01", {}),
-            (prog("(partial (q . 34))"), b"\x01", {}),
-            (prog("(shift (q . 1) (q . 4000000))"), b"\x01", {}),
-            (P_TRUE, b"\x81\x05", {}),
-            (b"\x81\x05", b"\x01", {}),
-            (P_TRUE, b"\x01", {"reveal": prog("(q . 2)")}),
-            (leafcheck, ser_atom(leaf_hash(leafcheck)), {}),
+    for program, env, kw, cap in [
+            (P_TRUE, b"\x01", {}, None),
+            (prog("1"), b"\x80", {}, None),
+            (prog("(x)"), b"\x01", {}, None),
+            (prog("(partial (q . 34))"), b"\x01", {}, None),
+            (prog("(shift (q . 1) (q . 4000000))"), b"\x01", {}, None),
+            (P_TRUE, b"\x81\x05", {}, None),
+            (b"\x81\x05", b"\x01", {}, None),
+            (P_TRUE, b"\x01", {"reveal": prog("(q . 2)")}, None),
+            (leafcheck, ser_atom(leaf_hash(leafcheck)), {}, None),
+            (P_LOOP, b"\x01", {}, 4),
+            (P_LOOP, b"\x01", {}, 200),
     ]:
         tx, spent = make_spend(program, env, **kw)
-        spend.verify_spend(tx, 0, spent)
+        if cap is None:
+            spend.verify_spend(tx, 0, spent)
+        else:
+            with_cap(cap, lambda: spend.verify_spend(tx, 0, spent))
     leaked = ALLOCATOR.x - before
     return leaked == 0, f"leaked {leaked} bytes"
 case("hygiene/no-leaks", no_leaks)

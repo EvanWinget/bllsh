@@ -175,6 +175,19 @@ BUDGET_PER_WITNESS_BYTE = 560
 assert BUDGET_PER_WITNESS_BYTE * 50 == SIG_VERIFY
 assert BUDGET_BASE == SIG_VERIFY
 
+# The absolute cap on element constructions in one spend, decode and
+# evaluation together, the interned nil and one excepted. Every
+# construction is preceded by a charge of at least STEP / 2 units
+# (the apply pop's two conses are the cheapest covered pair), so the
+# largest budget the spend clamp grants affords at most
+# BUDGET_MAX / (STEP / 2) constructions, 186,669,000, and the cap
+# sits just above at the next round number. Exhaustion therefore
+# latches before the cap on any spend the clamp admits, and the cap
+# is the backstop that turns the charge coverage argument into a
+# hard provisioning number. spend.py asserts the relationship, since
+# the block weight input to BUDGET_MAX lives there.
+ELEMENT_ALLOCATION_LIMIT = 187_000_000
+
 # The default allowance when an evaluation is started without an
 # explicit budget. Large enough that only a pathological single
 # demand exhausts it (a shift whose output size bound alone prices
@@ -201,7 +214,13 @@ class Budget:
     guarded program overran its declaration), not exhaustion. The
     two latches are mutually exclusive because no charge can reach
     the outer counter while an allowance is active, and no allowance
-    can exist unless its lump already fit."""
+    can exist unless its lump already fit.
+
+    A third latch is set from outside: the allocator latches
+    alloc_breach when a counted span crosses the element allocation
+    cap. It fails every later charge without setting either charge
+    latch, and it survives clear_allowances, so a guard unwind
+    cannot launder a breach into a program outcome."""
 
     def __init__(self, limit):
         self.limit = limit
@@ -209,13 +228,14 @@ class Budget:
         self.exhausted = False
         self.allowances = []
         self.guard_breach = False
+        self.alloc_breach = False
 
     def charge(self, amount):
         """Spends amount, against the innermost guard allowance if
         one is active, else against the budget itself. Charged before
-        the work it covers. False once either latch is set. A zero
+        the work it covers. False once any latch is set. A zero
         charge always fits until then."""
-        if self.exhausted or self.guard_breach:
+        if self.exhausted or self.guard_breach or self.alloc_breach:
             return False
         if self.allowances:
             allowed, used = self.allowances[-1]
@@ -244,17 +264,24 @@ class Budget:
         return used == allowed
 
     def clear_allowances(self):
-        """Discards all guard allowances and the breach latch, used
-        when an unwind abandons the guarded evaluation."""
+        """Discards all guard allowances and the guard breach latch,
+        used when an unwind abandons the guarded evaluation. The
+        allocation breach latch stays: it is a resource invariant of
+        the whole spend, not a guarded program outcome."""
         self.allowances = []
         self.guard_breach = False
 
+    def latch_alloc_breach(self):
+        """Latched by the allocator when a counted span crosses the
+        element allocation cap. Fatal to the whole evaluation."""
+        self.alloc_breach = True
+
     @property
     def latched(self):
-        """True once any charge has failed, whichever latch it set.
-        The one predicate call sites need to tell a failed charge
-        from a missing result."""
-        return self.exhausted or self.guard_breach
+        """True once any charge has failed or would fail, whichever
+        latch is set. The one predicate call sites need to tell a
+        failed charge from a missing result."""
+        return self.exhausted or self.guard_breach or self.alloc_breach
 
 
 def budget_for_witness_size(witness_size):

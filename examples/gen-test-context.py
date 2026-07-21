@@ -395,7 +395,7 @@ REGION_END = "; --- end committed program ---"
 
 # the BIP341 unspendable internal key, the x coordinate of a point
 # with no known discrete logarithm. UNSPENDABLEIPK in
-# examples/lib-taproot carries the same bytes on the bll side.
+# examples/lib-exclusivity carries the same bytes on the bll side.
 UNSPENDABLE_IPK = bytes.fromhex(H_POINT)
 
 
@@ -770,7 +770,10 @@ def gen_singleton():
     print("; this setter context is self consistent: the committed leaf, the")
     print("; control block and the spent scriptPubKey satisfy the BIP341")
     print("; equation, which the spend command verifies itself and this")
-    print("; harness does not, and the muladd raises on a mismatch")
+    print("; harness does not, and the muladd raises on a mismatch. The")
+    print("; reconstruction defs are imported here, outside the committed")
+    print("; region, so the pin runs without riding into the committed leaf")
+    print("import examples/lib-taproot")
     print("eval (TAPROOT (t (tx 9)) (tx 6) (tx 8) (tx 7) (CHECKTAPSPK (tx 16)))")
     print("; expect: 1")
     print()

@@ -502,10 +502,17 @@ class WorkItem:
 def eval(sexpr : Element, globalenv : Element, budget : Optional[Budget] = None) -> Element:
     wi = WorkItem.begin(sexpr, globalenv, budget)
 
-    while not wi.finished() and not wi.budget.exhausted:
+    b = wi.budget
+    while not wi.finished() and not b.exhausted and not b.alloc_breach:
         wi.step()
 
-    if wi.budget.exhausted:
+    # The two latches are mutually exclusive: after a breach every
+    # charge fails without latching exhaustion.
+    if b.alloc_breach:
+        wi.unwind()
+        return Error("element allocation limit exceeded")
+
+    if b.exhausted:
         wi.unwind()
         return Error("budget exhausted")
 
