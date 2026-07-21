@@ -1,6 +1,6 @@
 
-; lib-taproot - shared taproot reconstruction and commitment
-; exclusivity helpers for the corpus
+; lib-taproot - shared taproot reconstruction and signing convention
+; helpers for the corpus
 ;
 ; Corpus examples pull these defs in with
 ;   import examples/lib-taproot
@@ -27,20 +27,6 @@ def (TAPROOT SPKODD LEAFHASH PATH IPK SPK) (secp256k1_muladd (TAPPATH IPK PATH L
 ; strip the 0x5120 taproot prefix from a scriptPubKey, raising if it
 ; is not a taproot output
 def (CHECKTAPSPK SPK) (if (= (substr SPK 0 2) 0x5120) (substr SPK 2) (x))
-
-; the BIP341 unspendable internal key, the x coordinate of a point
-; with no known discrete logarithm, so an output naming it as the
-; internal key has no key path
-def UNSPENDABLEIPK 0x50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0
-
-; the executing leaf is the only spend path of the spent output: an
-; empty merkle path means a single leaf tree and the unspendable
-; internal key means no key path. Meaningful under a validated
-; spend, where BIP341 validation has already checked this control
-; block against the spent scriptPubKey. Under the legacy setter
-; harness the fields are unchecked witness bytes, and a context
-; without a script path control block has no fields 7 and 8 at all.
-def (SOLELEAF) (all (= (tx 8) 0) (= (tx 7) (UNSPENDABLEIPK)))
 
 ; the corpus signing convention for explicit messages, everything a
 ; signature covers that is not a bip342_txmsg transaction hash: a
