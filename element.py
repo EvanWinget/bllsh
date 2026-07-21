@@ -17,6 +17,27 @@ class Allocator:
         self.effort_limit = 100000 #*10000000
         self.counter = 0
         self.freed = dict()
+        self.cap_limit = None
+        self.cap_base = 0
+        self.cap_budget = None
+
+    def arm_element_cap(self, limit, budget):
+        """Begin the counted span of one spend: at most limit element
+        constructions from this call until disarm. The interned nil
+        and one are excepted because they are constructed once at
+        import and reused. On crossing the cap the budget's
+        allocation breach latch is set, and the span stays armed so
+        later constructions during the unwind change nothing."""
+        self.cap_limit = limit
+        self.cap_base = self.counter
+        self.cap_budget = budget
+
+    def disarm_element_cap(self):
+        """End the counted span. Outside a span construction is
+        uncounted: the repl and the symbolic evaluator run uncapped,
+        only the spend driver arms the cap."""
+        self.cap_limit = None
+        self.cap_budget = None
 
     def reset_work(self):
         self.effort = 0
@@ -40,6 +61,8 @@ class Allocator:
             frame = frame.f_back
         self.counter += 1
         self.allocated[w] = [n, (self.counter, lines)]
+        if self.cap_limit is not None and self.counter - self.cap_base > self.cap_limit:
+            self.cap_budget.latch_alloc_breach()
 
     def realloc(self, old, new, w):
         assert w in self.allocated

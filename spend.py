@@ -48,8 +48,8 @@ from typing import List, Optional, Tuple
 
 import bll
 import costs
-from costs import Budget, budget_for_witness_size
-from element import Atom, Cons, Element, Error
+from costs import Budget, ELEMENT_ALLOCATION_LIMIT, STEP, budget_for_witness_size
+from element import ALLOCATOR, Atom, Cons, Element, Error
 from verystable.core.key import TaggedHash, tweak_add_pubkey
 from verystable.core.messages import MAX_BLOCK_WEIGHT, CTransaction, CTxOut, ser_string
 from opcodes import Set_GLOBAL_TX, Set_GLOBAL_TX_INPUT_IDX, Set_GLOBAL_TX_SCRIPT, Set_GLOBAL_UTXOS
@@ -68,6 +68,12 @@ ANNEX_TAG = 0x50
 # the whole block would buy. The saturation makes that a stated
 # invariant rather than a consequence of the block weight limit.
 BUDGET_MAX = budget_for_witness_size(MAX_BLOCK_WEIGHT)
+
+# The element allocation cap is a backstop of the charge coverage:
+# at least STEP / 2 units precede every construction, so the largest
+# budget the clamp grants cannot afford the cap and exhaustion fires
+# first on every admissible spend.
+assert ELEMENT_ALLOCATION_LIMIT * (STEP // 2) >= BUDGET_MAX
 
 # A serialized atom's payload is capped at 0xFFFFF bytes by the
 # grammar itself: the widest size prefix carries 20 bits.
@@ -284,38 +290,54 @@ def verify_spend(tx: CTransaction, input_index: int, spent_outputs: List[CTxOut]
     def refused(reason: str) -> SpendResult:
         return SpendResult(reason, used=budget.used, limit=limit)
 
-    program = deserialize_canonical(leaf_script, budget)
-    if program is None:
+    def budget_refused() -> SpendResult:
+        """A latched budget with no result. The allocation breach is
+        named apart from exhaustion: the two latches are exclusive
+        and the breach is a resource refusal, not a spent budget."""
+        if budget.alloc_breach:
+            return refused("element allocation limit exceeded")
         return refused("budget exhausted")
-    if isinstance(program, Error):
-        reason = f"leaf script: {program.val2}"
-        program.deref()
-        return refused(reason)
 
-    env = deserialize_canonical(env_bytes, budget)
-    if env is None:
-        program.deref()
-        return refused("budget exhausted")
-    if isinstance(env, Error):
-        reason = f"environment: {env.val2}"
-        Element.deref_all(program, env)
-        return refused(reason)
+    # The counted span of the cap is decode plus evaluation: every
+    # element the spend constructs is counted, and the span is
+    # disarmed before the verdict returns so the repl outside spends
+    # runs uncapped.
+    ALLOCATOR.arm_element_cap(ELEMENT_ALLOCATION_LIMIT, budget)
+    try:
+        program = deserialize_canonical(leaf_script, budget)
+        if program is None:
+            return budget_refused()
+        if isinstance(program, Error):
+            reason = f"leaf script: {program.val2}"
+            program.deref()
+            return refused(reason)
 
-    Set_GLOBAL_TX(tx)
-    Set_GLOBAL_TX_INPUT_IDX(input_index)
-    Set_GLOBAL_TX_SCRIPT(leaf_script)
-    Set_GLOBAL_UTXOS(spent_outputs)
+        env = deserialize_canonical(env_bytes, budget)
+        if env is None:
+            program.deref()
+            return budget_refused()
+        if isinstance(env, Error):
+            reason = f"environment: {env.val2}"
+            Element.deref_all(program, env)
+            return refused(reason)
 
-    result = bll.eval(program, env, budget)
-    if isinstance(result, Error):
-        # The bare message keeps one verdict vocabulary across the
-        # phases: a budget latched during decode and one exhausted
-        # during evaluation read identically.
-        reason = result.val2
+        Set_GLOBAL_TX(tx)
+        Set_GLOBAL_TX_INPUT_IDX(input_index)
+        Set_GLOBAL_TX_SCRIPT(leaf_script)
+        Set_GLOBAL_UTXOS(spent_outputs)
+
+        result = bll.eval(program, env, budget)
+        if isinstance(result, Error):
+            # The bare message keeps one verdict vocabulary across the
+            # phases: a budget latched during decode and one exhausted
+            # during evaluation read identically.
+            reason = result.val2
+            result.deref()
+            return refused(reason)
+        if result.is_nil():
+            result.deref()
+            return refused("program result is nil")
         result.deref()
-        return refused(reason)
-    if result.is_nil():
-        result.deref()
-        return refused("program result is nil")
-    result.deref()
-    return SpendResult("", used=budget.used, limit=limit)
+        return SpendResult("", used=budget.used, limit=limit)
+    finally:
+        ALLOCATOR.disarm_element_cap()

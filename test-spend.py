@@ -342,6 +342,137 @@ case("budget/block-weight-clamp",
                       spend.BUDGET_MAX) == spend.BUDGET_MAX,
               f"BUDGET_MAX {spend.BUDGET_MAX}"))
 
+# ---- the element allocation cap ----
+
+# A self-application loop: the program applies its own environment to
+# itself, so every step is machine work that allocates continuation
+# conses until a limit stops it. Decode builds 11 elements, the loop
+# then allocates without bound, which separates the two phases under
+# a small injected cap.
+P_LOOP = prog("(a (q . (a 1 1)) (q . (a 1 1)))")
+
+
+def with_cap(limit, fn):
+    """Run fn with the spend cap patched to limit, restoring the
+    consensus constant afterwards."""
+    saved = spend.ELEMENT_ALLOCATION_LIMIT
+    spend.ELEMENT_ALLOCATION_LIMIT = limit
+    try:
+        return fn()
+    finally:
+        spend.ELEMENT_ALLOCATION_LIMIT = saved
+
+
+def cap_exact_boundary():
+    """The counted span admits exactly the cap and latches on the
+    next construction, without touching the charge latches."""
+    b = Budget(2**62)
+    ALLOCATOR.arm_element_cap(3, b)
+    els = [Atom(bytes([i + 2])) for i in range(3)]
+    at_cap = not b.alloc_breach and b.charge(0)
+    els.append(Atom(b"\x05"))
+    over = (b.alloc_breach and not b.charge(0) and b.latched
+            and not b.exhausted and not b.guard_breach)
+    ALLOCATOR.disarm_element_cap()
+    Element.deref_all(*els)
+    return at_cap and over, f"breach {b.alloc_breach}"
+case("cap/exact-boundary", cap_exact_boundary)
+
+
+def cap_interned_exempt():
+    """The interned nil and one are constructed once at import, so
+    reusing them costs nothing against the cap."""
+    b = Budget(2**62)
+    warm = [Atom(b""), Atom(b"\x01")]
+    ALLOCATOR.arm_element_cap(0, b)
+    reused = [Atom(b""), Atom(b"\x01"), Atom(b""), Atom(b"\x01")]
+    ok = not b.alloc_breach
+    ALLOCATOR.disarm_element_cap()
+    Element.deref_all(*warm, *reused)
+    return ok, f"breach {b.alloc_breach}"
+case("cap/interned-exempt", cap_interned_exempt)
+
+
+def cap_disarm_restores():
+    """After disarm construction is uncounted again."""
+    b = Budget(2**62)
+    ALLOCATOR.arm_element_cap(0, b)
+    ALLOCATOR.disarm_element_cap()
+    el = Atom(b"\x02")
+    ok = not b.alloc_breach and b.charge(0)
+    el.deref()
+    return ok, f"breach {b.alloc_breach}"
+case("cap/disarm-restores", cap_disarm_restores)
+
+
+def cap_breach_survives_unwind():
+    """clear_allowances drops guard state but not the breach latch,
+    so an unwind cannot launder the cap into a program outcome."""
+    b = Budget(1000)
+    b.push_allowance(100)
+    b.latch_alloc_breach()
+    b.clear_allowances()
+    return (b.alloc_breach and not b.charge(0) and b.latched
+            and not b.guard_breach and not b.exhausted), \
+        f"breach {b.alloc_breach} guard {b.guard_breach}"
+case("cap/breach-survives-unwind", cap_breach_survives_unwind)
+
+
+def cap_decode_breach():
+    """A cap below the leaf script's own element count refuses the
+    spend during decode, named apart from exhaustion."""
+    tx, spent = make_spend(P_LOOP, b"\x01")
+    r = with_cap(4, lambda: spend.verify_spend(tx, 0, spent))
+    return (str(r) == "invalid: element allocation limit exceeded",
+            str(r))
+case("cap/decode-breach", cap_decode_breach)
+
+
+def cap_eval_breach():
+    """A cap the decode fits but the loop crosses refuses the spend
+    during evaluation."""
+    tx, spent = make_spend(P_LOOP, b"\x01")
+    r = with_cap(200, lambda: spend.verify_spend(tx, 0, spent))
+    return (str(r) == "invalid: element allocation limit exceeded",
+            str(r))
+case("cap/eval-breach", cap_eval_breach)
+
+
+def cap_guard_breach_fatal():
+    """A breach inside a softfork guard allowance fails the whole
+    spend: the cap is a resource invariant, not a guarded program
+    outcome the mismatch rule could absorb."""
+    guarded = prog("(sf (q . 50000) (q . 0) (q a 1 1) (q a 1 1))")
+    tx, spent = make_spend(guarded, b"\x01")
+    r = with_cap(300, lambda: spend.verify_spend(tx, 0, spent))
+    return (str(r) == "invalid: element allocation limit exceeded",
+            str(r))
+case("cap/guard-breach-fatal", cap_guard_breach_fatal)
+
+
+def cap_exhaustion_first_at_consensus_constant():
+    """Under the real constant the loop exhausts its budget long
+    before the cap: the backstop is unreachable from an admissible
+    spend, which is the relationship the module level assert pins."""
+    tx, spent = make_spend(P_LOOP, b"\x01")
+    r = spend.verify_spend(tx, 0, spent)
+    return str(r) == "invalid: budget exhausted", str(r)
+case("cap/exhaustion-first-at-consensus-constant",
+     cap_exhaustion_first_at_consensus_constant)
+
+
+def cap_breach_no_leak():
+    """Both breach phases free everything they built."""
+    tx, spent = make_spend(P_LOOP, b"\x01")
+    spend.verify_spend(tx, 0, spent)  # warm the interned atoms
+    before = ALLOCATOR.x
+    with_cap(4, lambda: spend.verify_spend(tx, 0, spent))
+    with_cap(200, lambda: spend.verify_spend(tx, 0, spent))
+    leaked = ALLOCATOR.x - before
+    return leaked == 0, f"leaked {leaked} bytes"
+case("cap/breach-no-leak", cap_breach_no_leak)
+
+
 # ---- allocator hygiene ----
 
 def no_leaks():
