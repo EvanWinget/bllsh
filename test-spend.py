@@ -21,6 +21,8 @@ import bll
 import costs
 import spend
 from costs import Budget, budget_for_witness_size
+from opcodes import (Set_GLOBAL_TX, Set_GLOBAL_TX_INPUT_IDX, Set_GLOBAL_TX_SCRIPT,
+                     Set_GLOBAL_UTXOS)
 from element import ALLOCATOR, Atom, Element, Error, SExpr, SerDeser
 from testutil import case, report
 from verystable.core.key import (TaggedHash, compute_xonly_pubkey, sign_schnorr,
@@ -341,6 +343,48 @@ case("budget/block-weight-clamp",
               and min(budget_for_witness_size(MAX_BLOCK_WEIGHT + 1000),
                       spend.BUDGET_MAX) == spend.BUDGET_MAX,
               f"BUDGET_MAX {spend.BUDGET_MAX}"))
+
+# ---- the selector 9 memory charges ----
+
+def tx9_totals():
+    """The bare selector 9 charges its replacement pair's three
+    element objects with the selector and the delivered pair's flat
+    finish escape on top, four ELEMENT_ALLOC in all, while the pair
+    selector (9 . idx) errors in the fold, before the memory charge
+    and the finish pop. Exact totals, so a moved or dropped charge
+    site fails by its own amount."""
+    program = prog("(q . 1)")
+    tx, spent = make_spend(program, b"\x80")
+    Set_GLOBAL_TX(tx)
+    Set_GLOBAL_TX_INPUT_IDX(0)
+    Set_GLOBAL_TX_SCRIPT(program)
+    Set_GLOBAL_UTXOS(spent)
+    try:
+        results = []
+        for src, expected, want in (
+                ("(tx (q . 9))",
+                 costs.STEP * 6 + costs.TX_ARG + 4 * costs.ELEMENT_ALLOC,
+                 None),
+                ("(tx (q 9 . 0))",
+                 costs.STEP * 5 + costs.TX_ARG,
+                 "tx: 9 should be an atom not a pair")):
+            se = SExpr.parse(src)
+            p = bll.ToBLL(se)
+            se.deref()
+            budget = Budget(2**62)
+            r = bll.eval(p, Atom(0), budget)
+            got = (budget.used, str(r)[:44])
+            ok = budget.used == expected and (want is None or want in str(r))
+            results.append((ok, got, expected))
+            r.deref()
+        all_ok = all(ok for ok, _, _ in results)
+        return all_ok, "; ".join(f"used {g[0]} want {e}" for _, g, e in results)
+    finally:
+        Set_GLOBAL_TX(None)
+        Set_GLOBAL_TX_INPUT_IDX(None)
+        Set_GLOBAL_TX_SCRIPT(None)
+        Set_GLOBAL_UTXOS(None)
+case("charges/tx-selector-9-memory", tx9_totals)
 
 # ---- the element allocation cap ----
 

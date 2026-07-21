@@ -8,7 +8,7 @@ import functools
 from dataclasses import dataclass, field
 from typing import Type, List, Optional, Any
 
-from costs import Budget, DEFAULT_BUDGET, GUARD, STEP, ENV_EDGE, atom_scan
+from costs import Budget, DEFAULT_BUDGET, ELEMENT_ALLOC, GUARD, STEP, ENV_EDGE, atom_scan
 from element import Element, SExpr, Atom, Cons, Error, Func, FuncClass
 from opcodes import SExpr_FUNCS, Op_FUNCS, Opcode, op_unknown, UNKNOWN_OP_RANGE
 from workitem import fn_fin, fn_quote, fn_op, fn_partial
@@ -417,6 +417,14 @@ class WorkItem:
             opnum = value.as_int()
             opcls = Op_FUNCS.get(opnum, None)
             if opcls is not None:
+                # The fresh binding is a program-reachable function
+                # object, its element object memory charged before
+                # the build like any escaping result. The same
+                # None-with-latched-budget contract as the scan
+                # charge above.
+                if not self.budget.charge(ELEMENT_ALLOC):
+                    value.deref()
+                    return None
                 value.deref()
                 return Func(fn_op, (opcls, opcls.initial_int_state()), opcls.initial_state())
         elif isinstance(value, Func) and issubclass(value.val1[0], (fn_op, fn_partial)):

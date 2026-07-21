@@ -8,6 +8,7 @@ import functools
 from dataclasses import dataclass, field
 from typing import Type, List, Optional, Any
 
+from costs import ELEMENT_ALLOC
 from element import Element, SExpr, Atom, Cons, Error, Func, FuncClass
 from opcodes import SExpr_FUNCS, Op_FUNCS, Opcode
 
@@ -102,6 +103,11 @@ class fn_partial(FuncClass):
             if state.is_nil():
                 workitem.error("partial: requires opcode argument")
             else:
+                # The wrapper Func is dispatch bookkeeping this
+                # implementation needs around the already-charged
+                # binding, not a second program value, so it is
+                # uncharged: the C++ mirror delivers the binding
+                # element itself here and constructs nothing.
                 workitem.fin_value(Func(cls, None, state))
         elif isinstance(args, Cons):
             arg, rest = args.steal_children()
@@ -155,5 +161,11 @@ class fn_partial(FuncClass):
                 args.deref()
                 workitem.fin_value(nextfunc)
             else:
+                # Each rebind is a fresh program-reachable function
+                # object, its element object memory charged before
+                # the build like any escaping result.
+                if not workitem.budget.charge(ELEMENT_ALLOC):
+                    Element.deref_all(nextfunc, args, env)
+                    return
                 workitem.new_continuation(Func(cls, None, nextfunc), args, env)
 

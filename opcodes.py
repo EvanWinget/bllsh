@@ -125,6 +125,20 @@ class BinOpcode(Opcode):
         assert int_state is None
         return state.bumpref()
 
+    @staticmethod
+    def finish_escape(budget, state):
+        """The finish path of the folds that deliver their running
+        accumulator as the result. Only that last accumulator
+        escapes the fold, every superseded intermediate dies with
+        the next binop, so the ELEMENT_ALLOC memory charge for the
+        delivered element object lands here, once per application.
+        The charge is flat on purpose: an interned or borrowed
+        delivery overpays it, the safe direction, and the finish
+        cost never depends on the operand values."""
+        if not budget.charge(costs.ELEMENT_ALLOC):
+            return None
+        return state.bumpref()
+
 class FixOpcode(Opcode):
     min_args = max_args = -1
 
@@ -194,6 +208,10 @@ class op_add(BinOpcode):
         else:
             return Error("add requires atoms")
 
+    @staticmethod
+    def finish(budget, int_state, state):
+        return BinOpcode.finish_escape(budget, state)
+
 class op_sub(BinOpcode):
     @staticmethod
     def initial_state():
@@ -225,9 +243,11 @@ class op_sub(BinOpcode):
         if state.is_cons():
             # The negation re-encodes the stored minuend: base, scan
             # and allocation charges like any other fold of this
-            # family.
+            # family, plus the delivered result object's memory
+            # charge.
             stored = state.val2
-            if not budget.charge(costs.ARITH_ARG + costs.ARITH_PER_BYTE * stored.val1):
+            if not budget.charge(costs.ARITH_ARG + costs.ELEMENT_ALLOC
+                                 + costs.ARITH_PER_BYTE * stored.val1):
                 return None
             enc = int_to_bytes(0 - stored.as_int())
             cap = cls.size_cap()
@@ -237,7 +257,9 @@ class op_sub(BinOpcode):
                 return None
             return Atom(enc)
         else:
-            return state.bumpref()
+            # A folded-past-the-marker state is the running
+            # difference, delivered like the other arithmetic folds.
+            return cls.finish_escape(budget, state)
 
 class op_mul(BinOpcode):
     @staticmethod
@@ -263,6 +285,10 @@ class op_mul(BinOpcode):
             return Atom(enc)
         else:
             return Error("mul requires atoms")
+
+    @staticmethod
+    def finish(budget, int_state, state):
+        return BinOpcode.finish_escape(budget, state)
 
 class op_mod(FixOpcode):
     min_args = max_args = 2
@@ -453,8 +479,10 @@ class op_b(BinOpcode):
     @classmethod
     def binop(cls, budget, left, right):
         # One charge per argument covers the amortized carry merges
-        # of the binary counter and the finish conses: each pending
-        # subtree consed at finish was pushed by exactly one fold.
+        # of the binary counter, time and merge-cons memory both.
+        # The finish conses charge at finish instead: a shared
+        # binding can run the finish once per finalise, so memory
+        # paid per argument here could be escaped many times there.
         if not budget.charge(costs.B_ARG):
             return None
         if left.is_nil():
@@ -481,6 +509,16 @@ class op_b(BinOpcode):
             l = state.val1.val1.bumpref()
             rest = state.val1.val2
             while rest.is_cons():
+                # Each finish cons escapes into the delivered tree,
+                # and this finish runs once per finalise of a shared
+                # binding over the same unchanged pending chain, so
+                # its memory charge lands here per cons, charged
+                # before the build with early exit, never amortized
+                # into the per-argument constant that a re-finalise
+                # would not pay again.
+                if not budget.charge(costs.ELEMENT_ALLOC):
+                    l.deref()
+                    return None
                 l = Cons(rest.val1.bumpref(), l)
                 rest = rest.val2
             assert rest.is_nil()
@@ -591,6 +629,10 @@ class op_or_bytes(BinOpcode):
             out[i] |= e
         return Atom(bytes(out))
 
+    @staticmethod
+    def finish(budget, int_state, state):
+        return BinOpcode.finish_escape(budget, state)
+
 class op_xor_bytes(BinOpcode):
     @classmethod
     def binop(cls, budget, left, right):
@@ -607,6 +649,10 @@ class op_xor_bytes(BinOpcode):
         for i,e in enumerate(right.val2):
             out[i] ^= e
         return Atom(bytes(out))
+
+    @staticmethod
+    def finish(budget, int_state, state):
+        return BinOpcode.finish_escape(budget, state)
 
 class op_and_bytes(BinOpcode):
     @classmethod
@@ -628,6 +674,10 @@ class op_and_bytes(BinOpcode):
                 out[i] = el & er
             return Atom(bytes(out))
 
+    @staticmethod
+    def finish(budget, int_state, state):
+        return BinOpcode.finish_escape(budget, state)
+
 class op_nand_bytes(BinOpcode):
     @classmethod
     def binop(cls, budget, left, right):
@@ -646,6 +696,10 @@ class op_nand_bytes(BinOpcode):
         for i in range(len(out)):
             out[i] ^= 255
         return Atom(bytes(out))
+
+    @staticmethod
+    def finish(budget, int_state, state):
+        return BinOpcode.finish_escape(budget, state)
 
 class op_shift(FixOpcode):
     min_args = max_args = 2
@@ -805,6 +859,10 @@ class op_strlen(BinOpcode):
             return Error(f"strlen: not an atom {right}")
         return Atom(left.as_int() + len(right.val2))
 
+    @staticmethod
+    def finish(budget, int_state, state):
+        return BinOpcode.finish_escape(budget, state)
+
 class op_cat(BinOpcode):
     @classmethod
     def binop(cls, budget, left, right):
@@ -822,6 +880,10 @@ class op_cat(BinOpcode):
         if not budget.charge(joint):
             return None
         return Atom(left.val2 + right.val2)
+
+    @staticmethod
+    def finish(budget, int_state, state):
+        return BinOpcode.finish_escape(budget, state)
 
 class op_substr(FixOpcode):
     min_args = 0
@@ -1206,11 +1268,24 @@ class op_tx(BinOpcode):
         else:
             return Error("tx: bad argument")
 
+        # Selector 9 replaces the accumulator with a fresh
+        # (leafver . sign) pair, three element objects charged
+        # before the dispatch builds them. The charge rides the
+        # selector alone: the pair's interned small encodings
+        # overpay it, the safe direction, and on the unset-context
+        # paths this implementation still crashes past it (the
+        # recorded tx crash family), where the mirror overpays and
+        # errors cleanly.
+        if code == 9 and which is None:
+            if not budget.charge(3 * costs.ELEMENT_ALLOC):
+                return None
+
         result = cls.get_tx_info(code, which)
         if isinstance(result, Element):
             # Selector 9's pair, or an error. Either way the
             # accumulator is replaced, not extended, and machine
-            # integer width atoms carry no allocation charge.
+            # integer width atoms carry no payload allocation
+            # charge.
             return result
         else:
             assert isinstance(result, bytes), f"invalid tx result {result}"
@@ -1225,6 +1300,10 @@ class op_tx(BinOpcode):
             if not budget.charge(joint):
                 return None
             return Atom(left.val2 + result)
+
+    @staticmethod
+    def finish(budget, int_state, state):
+        return BinOpcode.finish_escape(budget, state)
 
     @classmethod
     def get_tx_info(cls, code, which):

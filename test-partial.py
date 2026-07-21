@@ -62,8 +62,9 @@ def errs(name, src, want):
 # a quoted argument costs four: the dispatch, then blleval, the
 # partial dispatch, its quoted argument's four frames counted as
 # three here plus the delivery, the finish step, the FIN frame and
-# the delivery to the receiver.
-PARG = 9 * costs.STEP
+# the delivery to the receiver. The delivered function object is a
+# program value, so its ELEMENT_ALLOC rides on top.
+PARG = 9 * costs.STEP + costs.ELEMENT_ALLOC
 
 
 # ---- the positive surface: bind, pass, apply ----
@@ -124,20 +125,48 @@ errs("partial/rejects-pair", "(partial (q 1 2))",
 # the opcode decode scan: a minimal number is free, a wide
 # non-minimal alias of the same opcode charges every byte, and the
 # threshold sits at machine-integer width: eight bytes scan free,
-# nine charge
+# nine charge. Each successful decode binds one charged function
+# object.
 total("partial/result-gate", "(partial (q . 34))",
-      mach(1), want="program result contains a function object")
+      mach(1) + costs.ELEMENT_ALLOC,
+      want="program result contains a function object")
 total("partial/eight-byte-opcode-alias-scans-free",
       "(partial (q . 0x2200000000000000))",
-      mach(1), want="program result contains a function object")
+      mach(1) + costs.ELEMENT_ALLOC,
+      want="program result contains a function object")
 total("partial/nine-byte-opcode-alias-charges-scan",
       "(partial (q . 0x220000000000000000))",
-      mach(1) + atom_scan(9),
+      mach(1) + costs.ELEMENT_ALLOC + atom_scan(9),
       want="program result contains a function object")
 total("partial/wide-opcode-atom-scan",
       "(partial (q . 0x2200000000000000000000))",
-      mach(1) + atom_scan(11),
+      mach(1) + costs.ELEMENT_ALLOC + atom_scan(11),
       want="program result contains a function object")
+
+# each argument fed through partial rebinds a fresh charged function
+# object on top of the wrapped opcode's own fold charges: the exact
+# total pins the per-rebind ELEMENT_ALLOC, which no result
+# comparison can see
+total("partial/rebind-charges-per-argument",
+      "(partial (q . 23) (q . 1) (q . 2))",
+      mach(3) + costs.ELEMENT_ALLOC             # the initial binding
+      + 2 * costs.ELEMENT_ALLOC                 # one rebind per fed value
+      + costs.ARITH_ARG + costs.ARITH_PER_BYTE * (0 + 1) + costs.MALLOC_PER_BYTE
+      + costs.ARITH_ARG + costs.ARITH_PER_BYTE * (1 + 1) + costs.MALLOC_PER_BYTE,
+      want="program result contains a function object")
+replay("replay/rebind-charge-boundary", "(partial (q . 23) (q . 1) (q . 2))")
+
+# finalising a bound b runs its finish rule, whose pending-chain
+# conses charge per finalise: the double-finalise replay pins the
+# exhaustion boundary through the second finalise's finish charges,
+# which a per-argument amortization would not pay again
+same_result("partial/b-shared-finalise-twice",
+            "(a (q rc (q . 0) (partial 1) (partial 1))"
+            " (partial (q . 10) (q . 1) (q . 2)))",
+            "(rc (q . 0) (b (q . 1) (q . 2)) (b (q . 1) (q . 2)))")
+replay("replay/b-shared-finalise-boundary",
+       "(a (q rc (q . 0) (partial 1) (partial 1))"
+       " (partial (q . 10) (q . 1) (q . 2)))")
 
 
 # ---- the result gate ----
