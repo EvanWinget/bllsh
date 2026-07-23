@@ -40,6 +40,7 @@ CORPUS = [
     "examples/test-flexmarks-htlc",
     "examples/test-p2-delegated",
     "examples/test-singleton",
+    "examples/test-cat",
     "examples/test-commitment",
 ]
 
