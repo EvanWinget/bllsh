@@ -23,13 +23,14 @@ For the vault, flexmarks, htlc and p2d targets the leaf script bytes
 are placeholders. The REPL evaluates the symbll program directly and
 never checks that it matches the committed script, so any bytes work
 as long as the control block, the utxo scriptPubKey and tx_script
-agree with each other. The commitment and singleton targets instead
-drive the spend command, which validates the committed leaf script as
-the program, so there the leaf script bytes are the real serialized
-bll program. The singleton's committed bytes are compiled from the
-sentinel delimited def region of examples/test-singleton, so the
-example's defs are the single source of truth, and every emitted
-spend line is validated by verify_spend before it is printed.
+agree with each other. The commitment, singleton and cat targets
+instead drive the spend command, which validates the committed leaf
+script as the program, so there the leaf script bytes are the real
+serialized bll program. The singleton's and the cat's committed
+bytes are compiled from the sentinel delimited def regions of their
+example files, so the examples' defs are the single source of truth,
+and every emitted spend line is validated by verify_spend before it
+is printed.
 """
 
 import contextlib
@@ -805,7 +806,9 @@ def gen_singleton():
 #   (a (q . BODY) (rc (q . INNER) 1))
 # serialized as WRAP_HEAD || BODY || WRAP_MID || SINNER || WRAP_TAIL,
 # so PREFIX = WRAP_HEAD || BODY || WRAP_MID is the shared committed
-# half and SINNER is the holder's serialized quoted inner program
+# half and SINNER is the holder's serialized inner program, the
+# quoting bytes riding at the end of WRAP_MID. gen_cat asserts the
+# split against a full serialization of the wrapper on every run.
 WRAP_HEAD = bytes.fromhex("ff01ffff80")
 WRAP_MID = bytes.fromhex("ffff06ffff80")
 WRAP_TAIL = bytes.fromhex("ff018080")
@@ -820,9 +823,8 @@ def region_constant(region, name):
 
 
 def cat_tail_text(genesis):
-    """The issuance program, genesis_by_coin_id's port, as a numeric
-    bll tree over the argument tree (DELTA PROOF . TS), DELTA at 2
-    and PROOF at 5:
+    """The issuance program as a numeric bll tree over the argument
+    tree (DELTA PROOF . TS), DELTA at 2 and PROOF at 5:
       (all (notall DELTA)
            (<s (substr PROOF (q . 4) (q . 5)) (q . 0x80))
            (= (substr PROOF (q . 5) (q . 41)) (q . GENESIS)))
@@ -915,6 +917,24 @@ def gen_cat():
     bh2 = holder(KEY_CAT_B2, prefix_b)
     dest = p2tr_raw(xonly(KEY_CAT_DEST))
 
+    # the wrap constants are hand transcribed, so pin them by
+    # serializing the whole wrapper around the compiled body and a
+    # real inner program: a byte misattributed between WRAP_MID and
+    # SINNER would shift every leaf consistently and pass the length
+    # fixed point alone
+    wrapper = Cons(Atom(b"\x01"),
+                   Cons(Cons(Atom(b""), SerDeser.Deserialize(body)),
+                        Cons(Cons(Atom(b"\x06"),
+                                  Cons(Cons(Atom(b""),
+                                            SerDeser.Deserialize(
+                                                h1["sinner"])),
+                                       Cons(Atom(b"\x01"), Atom(b"")))),
+                             Atom(b""))))
+    if SerDeser.Serialize(wrapper) != h1["leaf"]:
+        raise SystemExit("the wrap constants do not serialize"
+                         " (a (q . BODY) (rc (q . INNER) 1))")
+    wrapper.deref()
+
     def claims(*items):
         """A claim list as a Cons list, each item a tuple of atoms
         whose leading members cons onto its final member, so a
@@ -933,15 +953,22 @@ def gen_cat():
     def oclaim(hol):
         return (b"", hol["sinner"], hol["par"])
 
-    def odisclaim(hol):
+    def disclaim(ver, leaf, ipk, path, par):
         """A disclaimer entry revealing a foreign output's taproot
-        preimage: leaf version, leaf bytes, internal key, empty
-        merkle path and output key parity."""
-        return (b"\x01", b"\xc2", hol["leaf"], UNSPENDABLE_IPK, b"",
-                hol["par"])
+        preimage: leaf version, leaf bytes, internal key, merkle
+        path and output key parity."""
+        return (b"\x01", ver, leaf, ipk, path, par)
+
+    def odisclaim(hol):
+        """The disclaimer for a foreign member leaf, a holder of the
+        other asset."""
+        return disclaim(b"\xc2", hol["leaf"], UNSPENDABLE_IPK, b"",
+                        hol["par"])
 
     def lclaim(pidx, hol):
-        return (int_to_bytes(pidx), hol["sinner"], hol["par"])
+        """The lineage claim, the same triple shape an input claim
+        carries, the index naming a parent input instead."""
+        return iclaim(pidx, hol)
 
     def cat_env(sinnerme, ic, oc, proof, proof2=b"", lc=None,
                 tail=None, iargs=b"", pfx=prefix):
@@ -991,6 +1018,8 @@ def gen_cat():
     err_tailhash = "invalid: Exception: 0x" + b"cat: tail hash".hex()
     err_notclaimed = ("invalid: Exception: 0x"
                       + b"cat: own input not claimed".hex())
+    err_leftover = ("invalid: Exception: 0x"
+                    + b"cat: leftover output claims".hex())
 
     print(f"; expect: {body_str}")
     print()
@@ -1008,8 +1037,10 @@ def gen_cat():
     print(f"; expect: {len(prefix)}")
     print("eval (= (strlen (PREFIXBYTES)) (PREFIXLEN))")
     print("; expect: 1")
-    print("eval (HASHLEAF (PREFIXBYTES) (SINNERH1))")
-    print(f"; expect: 0x{h1['leafhash'].hex()}")
+    for name, hol in (("SINNERH1", h1), ("SINNERH2", h2),
+                      ("SINNERH3", h3)):
+        print(f"eval (HASHLEAF (PREFIXBYTES) ({name}))")
+        print(f"; expect: 0x{hol['leafhash'].hex()}")
     print()
     print("; the issuance program and its committed tree hash")
     print(f"def TAILGEN (q {cat_tail_text(genesis)[1:-1]})")
@@ -1025,8 +1056,13 @@ def gen_cat():
     print("eval (ODD8 0)")
     print("; expect: nil")
     print()
-    print("; the canonical form guard and the fixed width size prefix")
+    print("; the canonical form guard, an out of range read raises rather")
+    print("; than parsing as zero, and the fixed width size prefix")
+    print("eval (RD1 0x7f 0)")
+    print("; expect: 127")
     print("eval (RD1 0x80 0)")
+    print("; expect: ERR(Exception: 0x" + b"cat: varint".hex() + ")")
+    print("eval (RD1 0x7f 5)")
     print("; expect: ERR(Exception: 0x" + b"cat: varint".hex() + ")")
     print("eval (= (LE16 300) 0x2c01)")
     print("; expect: 1")
@@ -1152,6 +1188,24 @@ def gen_cat():
                       proof(txa), proof(gentx), lclaim(0, h1),
                       iargs=sigb), err_notclaimed)
     print()
+    print("; a claim list longer than the odd outputs is refused, the")
+    print("; entries must end exactly with them")
+    cat_spend(txb, utxob, 0, h3,
+              cat_env(h3["sinner"], claims(iclaim(0, h3)),
+                      claims(oclaim(h1), oclaim(h1)), proof(txa),
+                      proof(gentx), lclaim(0, h1), iargs=sigb),
+              err_leftover)
+    print()
+    print("; a non-minimally encoded claim or lineage index is re-encoded")
+    print("; before its countdown, 0x00 is index zero, not an atom that")
+    print("; never counts down")
+    cat_spend(txb, utxob, 0, h3,
+              cat_env(h3["sinner"],
+                      claims((b"\x00", h3["sinner"], h3["par"])),
+                      claims(oclaim(h1)), proof(txa), proof(gentx),
+                      (b"\x00", h1["sinner"], h1["par"]), iargs=sigb),
+              "valid")
+    print()
 
     print("; holder 3's inner program refuses a foreign signature, the")
     print("; authorization layer under the asset layer")
@@ -1179,7 +1233,8 @@ def gen_cat():
                       iargs=sigc), "valid")
     print()
 
-    # context D: a merge of both live coins, one input on each branch
+    # context D: a merge of both live member outputs, one input on
+    # each branch
     txd, utxod = make_tx2([(txa.sha256, 0, 90001, h3["spk"]),
                            (gentx.sha256, 1, 8999, h2["spk"])],
                           [(49001, h1["spk"]), (49999, h2["spk"])],
@@ -1280,25 +1335,43 @@ def gen_cat():
     print()
 
     # context H: the two-asset swap, each run claiming its own
-    # members and disclaiming the other asset's
+    # members and disclaiming the other asset's, plus two odd
+    # bystanders exercising the disclaimer's other shapes
     gentxb, _ = make_tx2([(FUNDING_TXID_ALT, 0, FUNDING_VALUE, dest)],
                          [(999, bh1["spk"]), (99000, dest)],
                          bh1["leaf"], bh1["cb"])
     gentxb.rehash()
+    short_el = SExpr.parse("(0 . 1)")
+    short_leaf = SerDeser.Serialize(short_el)
+    short_el.deref()
+    short_lh = tapleaf_hash(short_leaf, LEAF_VERSION_BLL)
+    short_spk, short_par = taproot_spk(UNSPENDABLE_IPK, short_lh, [])
+    ts_leaf = bytes([0x51])
+    ts_sib = tapleaf_hash(bytes([0x52]))
+    ts_spk, ts_par = taproot_spk(xonly(KEY_CAT_DEST),
+                                 tapleaf_hash(ts_leaf), [ts_sib])
+    dshort = disclaim(b"\xc2", short_leaf, UNSPENDABLE_IPK, b"",
+                      int_to_bytes(short_par))
+    dts = disclaim(b"\xc0", ts_leaf, xonly(KEY_CAT_DEST), ts_sib,
+                   int_to_bytes(ts_par))
     txh, utxoh = make_tx2([(txa.sha256, 0, 90001, h3["spk"]),
-                           (gentxb.sha256, 0, 999, bh1["spk"])],
-                          [(90001, h1["spk"]), (999, bh2["spk"])],
+                           (gentxb.sha256, 0, 999, bh1["spk"]),
+                           (FUNDING_TXID, 1, FUNDING_VALUE, dest)],
+                          [(90001, h1["spk"]), (999, bh2["spk"]),
+                           (501, short_spk), (503, ts_spk),
+                           (FUNDING_VALUE - 3004, dest)],
                           h3["leaf"], h3["cb"])
     txh.rehash()
     sigh0 = cat_sig(h3, txh, utxoh, 0)
     sigh1 = cat_sig(bh1, txh, utxoh, 1)
     envh0 = cat_env(h3["sinner"], claims(iclaim(0, h3)),
-                    claims(oclaim(h1), odisclaim(bh2)), proof(txa),
-                    proof(gentx), lclaim(0, h1), iargs=sigh0)
+                    claims(oclaim(h1), odisclaim(bh2), dshort, dts),
+                    proof(txa), proof(gentx), lclaim(0, h1),
+                    iargs=sigh0)
     envh1 = cat_env(bh1["sinner"], claims(iclaim(1, bh1)),
-                    claims(odisclaim(h1), oclaim(bh2)), proof(gentxb),
-                    tail=cat_tail_text(genesis_b), iargs=sigh1,
-                    pfx=prefix_b)
+                    claims(odisclaim(h1), oclaim(bh2), dshort, dts),
+                    proof(gentxb), tail=cat_tail_text(genesis_b),
+                    iargs=sigh1, pfx=prefix_b)
     print(div)
     print("; context H: the two-asset swap. Asset A's units move to holder")
     print("; 1 while asset B's unit moves between B holders, one")
@@ -1306,7 +1379,11 @@ def gen_cat():
     print("; disclaims the other's by revealing the foreign leaf and")
     print("; showing its first committed-length bytes differ from its own")
     print("; prefix, the partition that makes cross-asset offers")
-    print("; composable.")
+    print("; composable. Two odd bystanders ride along and both runs")
+    print("; disclaim them too: a bll leaf far shorter than the committed")
+    print("; length, foreign because a short atom never equals the full")
+    print("; prefix, and a tapscript leaf behind a one sibling merkle")
+    print("; path, foreign on its leaf version alone.")
     txh.wit.vtxinwit[1].scriptWitness.stack = [envh1, bh1["leaf"],
                                                bh1["cb"]]
     cat_spend(txh, utxoh, 0, h3, envh0, "valid")
@@ -1416,6 +1493,9 @@ def gen_cat():
     # context L: a member whose SINNER region is not a serialized
     # element, payable but never spendable
     frozen_leaf = prefix + b"\xa0" + WRAP_TAIL
+    if not 253 <= len(frozen_leaf) <= 0x7fff:
+        raise SystemExit("frozen leaf outside the 0xfd compact size"
+                         " form HASHLEAF assumes")
     frozen_lh = tapleaf_hash(frozen_leaf, LEAF_VERSION_BLL)
     frozen_spk, frozen_par = taproot_spk(UNSPENDABLE_IPK, frozen_lh, [])
     frozen = {"sinner": b"\xa0", "leaf": frozen_leaf,
@@ -1492,9 +1572,10 @@ def gen_cat():
     print("; executing leaf hash still matches, so the check-free body")
     print("; accepts the spender's boundary, and with it any program that")
     print("; shares only the shortened prefix: an attacker mints by")
-    print("; vetting leaves this body never saw. The committed PREFIXLEN")
-    print("; is what pins the split, the spend line at the end re-refuses")
-    print("; the same transaction under the committed layout.")
+    print("; vetting leaves this body never saw. The mint transaction")
+    print("; below exhibits exactly that, and each eval pair shows the")
+    print("; committed PREFIXLEN refusing the split the check-free body")
+    print("; accepts.")
     print()
     print(nolen_def)
     print()
@@ -1513,6 +1594,56 @@ def gen_cat():
     print("; boundary is not the spender's to name")
     print("eval (CAT2 (PREFIXSHIFT) (SINNERSHIFTME) (ICSHIFT) (OCSHIFT)"
           " (PROOFA) (PROOFG) (LCSHIFT) 0 0 (SIGB) (INNERH3))")
+    print("; expect: ERR(Exception: 0x" + b"cat: invalid spend".hex() + ")")
+    print()
+
+    # the mint itself: under the shifted boundary the check-free body
+    # vets an output whose leaf is the shortened prefix followed by
+    # an inner program the asset never admitted
+    evil_inner = SExpr.parse(
+        f"(38 (0 . 0x{xonly(KEY_CAT_DEST).hex()}) (42) 1)")
+    evil_sinner = SerDeser.Serialize(evil_inner)
+    evil_inner.deref()
+    if evil_sinner[:1] == shift:
+        raise SystemExit("the mint exhibit needs an inner whose first"
+                         " byte differs from the shifted boundary byte")
+    evil_leaf = shift_prefix + evil_sinner + WRAP_TAIL
+    if not 253 <= len(evil_leaf) <= 0x7fff:
+        raise SystemExit("mint leaf outside the 0xfd compact size"
+                         " form HASHLEAF assumes")
+    evil_lh = tapleaf_hash(evil_leaf, LEAF_VERSION_BLL)
+    evil_spk, evil_par = taproot_spk(UNSPENDABLE_IPK, evil_lh, [])
+    txm, utxom = make_tx2([(txa.sha256, 0, 90001, h3["spk"])],
+                          [(90001, evil_spk)], h3["leaf"], h3["cb"])
+    txm.rehash()
+    sigm = cat_sig(h3, txm, utxom, 0)
+    print("; and the freedom is the mint. The transaction below pays the")
+    print("; whole supply to a leaf that is the shortened prefix followed")
+    print("; by an inner program for a key the asset never admitted: its")
+    print("; first byte differs from the shifted boundary byte, so no")
+    print("; committed leaf ever carried it. The check-free body vets it")
+    print("; as a member, the committed program refuses the split that")
+    print("; admitted it.")
+    print()
+    env_mint = cat_env(shift + h3["sinner"],
+                       claims((b"", shift + h3["sinner"], h3["par"])),
+                       claims((b"", evil_sinner, int_to_bytes(evil_par))),
+                       proof(txa), proof(gentx),
+                       (b"", shift + h1["sinner"], h1["par"]),
+                       iargs=sigm, pfx=shift_prefix)
+    txm.wit.vtxinwit[0].scriptWitness.stack = [env_mint, h3["leaf"],
+                                               h3["cb"]]
+    emit_context2("the mint transaction", txm, utxom, h3["leaf"])
+    print(f"def SINNERMINT 0x{evil_sinner.hex()}")
+    print(f"def OCMINT (q (0 0x{evil_sinner.hex()} . {evil_par}))")
+    print(f"def SIGM 0x{sigm.hex()}")
+    print()
+    print("eval (CAT2NOLEN (PREFIXSHIFT) (SINNERSHIFTME) (ICSHIFT)"
+          " (OCMINT) (PROOFA) (PROOFG) (LCSHIFT) 0 0 (SIGM) (INNERH3))")
+    print("; expect: 1")
+    print()
+    print("eval (CAT2 (PREFIXSHIFT) (SINNERSHIFTME) (ICSHIFT) (OCMINT)"
+          " (PROOFA) (PROOFG) (LCSHIFT) 0 0 (SIGM) (INNERH3))")
     print("; expect: ERR(Exception: 0x" + b"cat: invalid spend".hex() + ")")
 
 
