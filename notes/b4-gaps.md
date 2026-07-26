@@ -7,6 +7,8 @@ for SPEC.md, or for upstream discussion, and the log is routed at B4
 close-out in the same way as part 1. Unit 1 (the delegation half of
 p2_delegated_puzzle_or_hidden_puzzle) recorded 2026-07-18. Unit 2
 (singleton_top_layer_v1_1, items 7 through 17) recorded 2026-07-18.
+Unit 3 (cat_v2 with genesis_by_coin_id, items 18 through 22)
+recorded 2026-07-23.
 
 ## Language and opcode surface
 
@@ -249,3 +251,78 @@ p2_delegated_puzzle_or_hidden_puzzle) recorded 2026-07-18. Unit 2
     flexmarks files stays inline until a third family member exists.
     The timelock helpers follow at the first B4 program that needs
     one.
+
+## The commitment layout, unit 3
+
+18. **A shared byte prefix restores currying under a flat leaf
+    hash.** Chia rebuilds a wrapped puzzle hash from an inner hash
+    because tree hashing is compositional. The bll leaf hash is a
+    flat sha256 over serialized bytes, so nothing can be rebuilt
+    from an inner hash alone. The port's substitute: every holder's
+    leaf is the shared body applied to a quoted trailing inner
+    program, so the serialization splits as PREFIX, SINNER, constant
+    suffix, the witness reveals PREFIX once, and members rebuild by
+    hashing PREFIX with a revealed SINNER. Two facts carry the
+    soundness. The committed PREFIXLEN pins the split, since a
+    spender-chosen boundary self-verifies against the executing leaf
+    hash at any split point and a shortened prefix vets programs the
+    body never saw, the mint the contrast section demonstrates. And
+    serialization is a prefix code, so no leaf can begin with two
+    different assets' complete prefixes, which makes membership
+    exclusive. PREFIXLEN is a fixed point of the body that quotes
+    it, width stable across two byte values, and the generator
+    asserts it on every run. Input for the commitment layout memo:
+    this is the general recipe for per-instance constants under a
+    committed program.
+
+19. **Non-membership is provable, and that is what makes assets
+    compose.** The odd amount marking makes membership objective
+    only if every odd output resolves, and demanding they all be
+    members would shut two assets out of one transaction, which
+    forecloses the offer flow. The resolution: an odd output is
+    either claimed as a member or disclaimed by revealing its actual
+    taproot preimage, leaf version, leaf bytes, internal key and
+    path, rebuilding the output key from it, and showing the leaf is
+    not a member, a different version or different first PREFIXLEN
+    bytes. Disclaiming a genuine member always fails, so the
+    partition is sound and each asset's conservation equation runs
+    over its own members. The cost is the foreign leaf bytes riding
+    the witness per disclaimer. The residue: an odd key path or
+    untweaked output has no preimage to reveal under this rule, so
+    plain payments beside a CAT use even amounts by convention, and
+    a keypath disclaimer form is future work if the offer flow needs
+    odd plain payouts.
+
+20. **The genesis issuance program fixes supply at one transaction
+    and locks it.** The ported genesis_by_coin_id refuses every
+    nonzero delta, so supply is exactly the odd member outputs of
+    the transaction that consumed the GENESIS outpoint, no melt and
+    no later issuance. Consequences worth recording: member spends
+    can contribute nothing to fees, which ride co-spent unmarked
+    inputs, and value freezes are always payer-borne, whether an
+    even payment to a member script, a SINNER region that never
+    deserializes, or an unbacked odd donation, all three
+    demonstrated in contexts. A first generation output spends
+    through the issuance path because the genesis transaction has no
+    member input for lineage to exhibit, and the program checks the
+    revealed parent consumed GENESIS at input 0, count byte
+    canonical, the same one restriction the singleton's genesis
+    branch carries.
+
+## The framework, unit 3
+
+21. **Foreign output key parity is witness data.** Rebuilding
+    another output's key needs its parity bit, which no opcode
+    exposes, so every membership claim, disclaimer and lineage claim
+    carries one. A wrong bit only refuses the spend through the
+    muladd. The executing input needs none, its leaf hash pins to
+    the introspected leaf hash directly and its control block
+    carries the bit the reconstruction defs read.
+
+22. **muladd refusals carry the mismatching point in the verdict.**
+    A false membership claim surfaces as the muladd's raise, whose
+    message appends a context dependent point, so the generator
+    asserts those verdicts by prefix and records the full message in
+    the expect marker. A corpus program wanting stable refusal
+    messages would need a non-raising point equality check, which
+    bll deliberately does not offer, the raise is the refusal.
